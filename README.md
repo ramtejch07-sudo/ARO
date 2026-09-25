@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Ambulance Route Optimization
 
 A C++ OOP mini-project that models an ambulance dispatch system, using
@@ -63,3 +64,6 @@ make
 
 Never push directly to `main`. Open a pull request into `dev`, get it
 reviewed, then merge `dev` into `main` once everything builds and runs.
+=======
+# sample
+>>>>>>> 82ec5e98fa3af5dfbf70f224b73d2189861fc6fc
