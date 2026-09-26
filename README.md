@@ -294,10 +294,10 @@ already running.
 
 | Member | Responsibility |
 |---|---|
-| Person A | `Location`, `Graph` |
-| Person B | `Vehicle`, `Ambulance`, `DispatchManager` |
-| Person C | `RouteOptimizer` (Dijkstra) |
-| Person D | `Hospital`, `Patient`, web backend/frontend integration |
+| JAGADEEP | `Location`, `Graph` |
+| JAGAN MOHAN | `Vehicle`, `Ambulance`, `DispatchManager` |
+| RAMTEJ   | `RouteOptimizer` (Dijkstra) |
+| SHASHANK | `Hospital`, `Patient`, web backend/frontend integration |
 
 ## Branching Strategy
 
