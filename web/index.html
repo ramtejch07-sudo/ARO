@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatch Console — Ambulance Route Optimization</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__title">
+    <span class="topbar__mark">＋</span>
+    <div>
+      <h1>Dispatch Console</h1>
+      <p class="topbar__sub">Ambulance Route Optimization</p>
+    </div>
+  </div>
+  <div class="topbar__status">
+    <span id="conn-dot" class="dot dot--pending"></span>
+    <span id="conn-text">Connecting to server…</span>
+  </div>
+</header>
+
+<main class="grid">
+
+  <!-- LEFT: Fleet -->
+  <section class="panel panel--fleet">
+    <h2>Fleet Status</h2>
+    <div id="fleet-list" class="list"></div>
+
+    <h2>Hospitals</h2>
+    <div id="hospital-list" class="list"></div>
+  </section>
+
+  <!-- CENTER: Map -->
+  <section class="panel panel--map">
+    <div class="panel__head">
+      <h2>Road Network</h2>
+      <span id="route-readout" class="route-readout">No route selected</span>
+    </div>
+    <svg id="map" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid meet"></svg>
+  </section>
+
+  <!-- RIGHT: Patients + dispatch -->
+  <section class="panel panel--patients">
+    <h2>New Patient</h2>
+    <form id="patient-form" class="form">
+      <label>Name
+        <input type="text" id="p-name" required placeholder="Jane Doe">
+      </label>
+      <label>Location
+        <select id="p-location" required></select>
+      </label>
+      <label>Severity
+        <select id="p-severity">
+          <option value="LOW">Low</option>
+          <option value="MEDIUM" selected>Medium</option>
+          <option value="HIGH">High</option>
+          <option value="CRITICAL">Critical</option>
+        </select>
+      </label>
+      <button type="submit" class="btn btn--primary">Add to queue</button>
+    </form>
+
+    <h2>Patient Queue</h2>
+    <div id="patient-list" class="list"></div>
+  </section>
+
+  <!-- BOTTOM: Dispatch log -->
+  <section class="panel panel--log">
+    <h2>Dispatch Log</h2>
+    <table id="log-table">
+      <thead>
+        <tr><th>Patient</th><th>Ambulance</th><th>Distance</th><th>Route</th></tr>
+      </thead>
+      <tbody id="log-body"></tbody>
+    </table>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
