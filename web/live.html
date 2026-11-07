@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Tracking — Ambulance Route Optimization</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="live.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <header class="side__head">
+      <h1>Live Tracking</h1>
+      <a href="index.html" class="link">Dispatch console</a>
+    </header>
+
+    <div class="row">
+      <button id="btn-track" class="btn btn--primary">Start GPS</button>
+      <button id="btn-follow" class="btn" disabled>Follow: on</button>
+      <button id="btn-clear" class="btn">Clear trail</button>
+    </div>
+    <p id="status" class="status" role="status">GPS is off.</p>
+
+    <div class="stats">
+      <div><span id="s-speed">0</span><small>km/h</small></div>
+      <div><span id="s-dist">0.00</span><small>km travelled</small></div>
+      <div><span id="s-acc">–</span><small>accuracy (m)</small></div>
+      <div><span id="s-head">–</span><small>heading</small></div>
+    </div>
+
+    <form id="search-form" class="search">
+      <input id="q" type="search" placeholder="Search a place or address" autocomplete="off">
+      <button class="btn" type="submit">Search</button>
+    </form>
+    <div id="results" class="list"></div>
+
+    <section id="route-card" class="route" hidden>
+      <div class="route__main"><span id="r-eta">–</span> <small id="r-dist"></small></div>
+      <div id="r-dest" class="route__dest"></div>
+      <div class="row">
+        <button id="btn-sim" class="btn">Simulate drive</button>
+        <button id="btn-cancel" class="btn">Cancel route</button>
+      </div>
+    </section>
+
+    <h2>Nearby hospitals</h2>
+    <div id="hospitals" class="list"><div class="empty">Start GPS to find hospitals near you.</div></div>
+  </aside>
+  <div id="map"></div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="live.js"></script>
+</body>
+</html>
