@@ -41,3 +41,6 @@ h2{font-size:13px;color:var(--dim);font-weight:500;margin:20px 0 8px}
   .side{width:100%;height:46%;border-right:0;border-top:1px solid var(--line)}
   #map{flex:1}
 }
+
+/* Dark look for the standard OpenStreetMap tiles */
+.leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.9); }
