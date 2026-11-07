@@ -1,15 +1,18 @@
 #include "Ambulance.h"
-#include <iostream>
+
+std::string toString(AmbulanceType t) { return t == AmbulanceType::ADVANCED ? "ADVANCED" : "BASIC"; }
+
+bool parseAmbulanceType(const std::string& text, AmbulanceType& out) {
+    if (text == "BASIC")    { out = AmbulanceType::BASIC;    return true; }
+    if (text == "ADVANCED") { out = AmbulanceType::ADVANCED; return true; }
+    return false;
+}
 
 Ambulance::Ambulance(int id, const Location& loc, AmbulanceType type)
     : Vehicle(id, loc), type(type) {}
 
-void Ambulance::dispatch(const Location& destination) {
-    std::cout << "[Ambulance " << id << " (" << getTypeName() << ")] "
-              << "Dispatched from " << currentLocation.getName()
-              << " to " << destination.getName() << "\n";
-    setAvailable(false);
-    setCurrentLocation(destination);
+void Ambulance::dispatch(const Location& /*destination*/) {
+    setStatus(VehicleStatus::EN_ROUTE);
 }
 
 AmbulanceType Ambulance::getType() const { return type; }

@@ -7,6 +7,9 @@
 RouteOptimizer::RouteOptimizer(const Graph& graph) : graph(graph) {}
 
 RouteResult RouteOptimizer::findShortestPath(int startId, int endId) const {
+    // Unknown endpoints are a normal "no route" outcome, not an exception.
+    if (!graph.hasLocation(startId) || !graph.hasLocation(endId)) return {{}, -1.0};
+
     std::unordered_map<int, double> dist;
     std::unordered_map<int, int> prev;
     for (const auto& [id, loc] : graph.getAllLocations()) {
