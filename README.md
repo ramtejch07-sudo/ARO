@@ -1,6 +1,6 @@
 # Ambulance Route Optimization
 
-A C++ OOP mini-project that models an emergency ambulance dispatch system. It builds a
+A C++ OOPS mini-project that models an emergency ambulance dispatch system. It builds a
 graph of a city's road network, finds the shortest route between any two points with
 Dijkstra's algorithm, and automatically dispatches the nearest available ambulance to a
 patient. The system exists in two forms: a command-line demo and a full web app (C++ REST
