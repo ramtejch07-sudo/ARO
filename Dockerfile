@@ -4,9 +4,10 @@ WORKDIR /app
 COPY include/ include/
 COPY src/ src/
 COPY server/ server/
+# Core sources = everything in src/ except the console demo's main.cpp
 RUN g++ -std=c++17 -O2 -static-libgcc -static-libstdc++ -Iinclude -Iserver \
-    server/ApiServer.cpp server/Database.cpp \
-    src/Location.cpp src/Graph.cpp src/RouteOptimizer.cpp \
+    server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp \
+    $(ls src/*.cpp | grep -v '/main.cpp') \
     -o ambulance_server -lpthread
 
 # Runtime stage — small final image. The binary is statically linked against
@@ -17,5 +18,10 @@ WORKDIR /app
 COPY --from=build /app/ambulance_server .
 COPY web/ web/
 RUN mkdir -p data
+# Render and most hosts inject PORT; the server reads it and falls back to 8080.
+ENV PORT=8080
 EXPOSE 8080
+# The slim image has no curl/wget, so the server binary probes itself (GET /api/health).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["./ambulance_server", "--healthcheck"]
 CMD ["./ambulance_server"]

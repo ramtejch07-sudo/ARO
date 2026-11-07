@@ -23,7 +23,7 @@ The system is built around six core classes, each with a single clear responsibi
 | `Ambulance : Vehicle` | A concrete vehicle type — basic or advanced life support |
 | `Hospital` | A destination with bed capacity |
 | `Patient` | Someone waiting for pickup, with a location and severity level |
-| `DispatchManager` | The coordinator — given a patient, finds and sends the nearest free ambulance |
+| `DispatchManager` | The coordinator — keeps the priority queue of waiting patients, picks the ambulance and hospital, and moves trips through their lifecycle |
 
 ### 1.2 OOP concepts demonstrated
 
@@ -42,20 +42,41 @@ The system is built around six core classes, each with a single clear responsibi
 
 ### 1.3 How a dispatch actually happens
 
-1. A `Patient` is added with a location and severity.
-2. `DispatchManager` loops over every `Ambulance` that is currently `available`.
-3. For each one, it asks `RouteOptimizer` for the shortest path from that ambulance's
-   current location to the patient's location.
-4. It keeps track of whichever ambulance has the **smallest total route distance** —
-   not necessarily the one that looks closest in a straight line, since real roads
-   rarely go in straight lines.
-5. That ambulance is marked unavailable, its location is updated to the patient's
-   location, and the whole event (patient, ambulance, distance, path) is logged.
+1. A `Patient` is added with a location and severity. Waiting patients sit in a **priority
+   queue**: `CRITICAL` first, then `HIGH`, `MEDIUM`, `LOW`; within the same severity the
+   patient who has waited longest goes first (then lowest id).
+2. `DispatchManager::dispatchPatient()` (or `dispatchNext()` for the top of the queue)
+   looks at every `AVAILABLE` ambulance and asks `RouteOptimizer` for the shortest road
+   route to the patient.
+3. **Severity rule:** for `HIGH`/`CRITICAL` patients, `ADVANCED` units are considered
+   first, even if a `BASIC` unit is closer; if no `ADVANCED` unit is free (or can reach the
+   patient) it falls back to the nearest `BASIC` unit. For `LOW`/`MEDIUM` the nearest unit
+   of either type wins.
+4. It then finds the **nearest hospital with a free bed** (Dijkstra from the patient's
+   location to each hospital with `getAvailableBeds() > 0`) and reserves the bed with
+   `admitPatient()` straight away, so two emergencies can't be promised the same last bed.
+5. The ambulance becomes `EN_ROUTE` and the trip is logged as two legs —
+   **ambulance → patient** and **patient → hospital** — each with its path, distance and ETA
+   (`ETA minutes = distance / speed × 60`; distances are km, default speed 40 km/h,
+   configurable via `POST /api/config`).
+6. If **no hospital has a free bed**, the ambulance is still sent to the scene and the
+   result carries an explicit warning. A hospital is looked up again when the unit is ready
+   to leave the scene; if there is still no bed, that step is refused (`409`) until a bed
+   is freed (`POST /api/hospitals/{id}/discharge`).
 
-This is a **greedy nearest-neighbor dispatch strategy**: simple, fast, and good enough
-for a single dispatch decision, though it doesn't account for multiple simultaneous
-emergencies competing for the same ambulance (a natural extension: solve dispatch as an
-assignment/matching problem instead of one-at-a-time).
+This is still a **greedy, one-patient-at-a-time** strategy. It does not solve several
+simultaneous emergencies as a global assignment problem (a natural extension).
+
+#### Ambulance lifecycle
+
+```
+AVAILABLE → EN_ROUTE → AT_SCENE → TRANSPORTING → RETURNING → AVAILABLE
+```
+
+`POST /api/dispatch/{id}/advance` moves one step (the ambulance's location follows: the
+scene on arrival, the hospital once transport ends). `POST /api/dispatch/{id}/complete`
+jumps straight to the end: the ambulance is freed at the hospital's location and the patient
+becomes `ADMITTED`. Beds stay occupied until `POST /api/hospitals/{id}/discharge`.
 
 ---
 
@@ -103,91 +124,120 @@ If no path exists between two locations, `totalDistance` comes back as `-1` — 
 
 ### 2.2 Nearest-Available-Ambulance Selection
 
-Used in `DispatchManager::handleEmergency()` (console version) and the `/api/dispatch`
-route (web version).
+Implemented once in `DispatchManager::selectAmbulance()` and used by both the console demo
+and the `/api/dispatch*` routes.
 
-This runs Dijkstra's once per available ambulance, comparing total route distance, and
-keeps the minimum — an O(A × (V + E) log V) operation for A ambulances. For the small
-fleets a project like this models, that's negligible; a production system with hundreds
-of ambulances would instead pre-index locations (e.g. with a spatial structure) to avoid
-recomputing full shortest paths against every vehicle.
+This runs Dijkstra's once per candidate ambulance, comparing total route distance, and
+keeps the minimum — an O(A × (V + E) log V) operation for A ambulances (see 1.3 for the
+`ADVANCED`-first rule for `HIGH`/`CRITICAL` patients). For the small fleets a project like
+this models, that's negligible; a production system with hundreds of ambulances would
+instead pre-index locations (e.g. with a spatial structure) to avoid recomputing full
+shortest paths against every vehicle.
 
 ---
 
 ## 3. System Architecture
 
-The project runs in two modes that **share the same core classes** — the web layer is
-a thin wrapper around the exact same `Graph`, `RouteOptimizer`, `Ambulance`, `Hospital`,
-`Patient`, and `DispatchManager` classes used by the console demo. Nothing about the
-core logic changes between the two.
+The project runs in two modes that **share the same core classes** — and, since the
+refactor, the same dispatch implementation. The API does not re-implement any dispatch
+logic: for each request it rebuilds a `DispatchManager` from the stored JSON (graph, fleet,
+hospitals, waiting patients), calls the very same methods the console demo calls, and
+writes the resulting state back.
 
 ```
 ┌─────────────────────────┐        ┌──────────────────────────────┐
 │   Console Demo           │        │   Web App                     │
 │   src/main.cpp            │        │                                │
 │                            │        │  Browser (web/)                │
-│   Builds a graph, runs    │        │   index.html / style.css /     │
-│   one route lookup and    │        │   app.js  --HTTP/JSON-->        │
-│   one dispatch, prints    │        │                                 │
-│   to the terminal.        │        │  C++ REST API (server/)         │
-│                            │        │   ApiServer.cpp                 │
-└─────────────────────────┘        │   - wraps Graph/RouteOptimizer/ │
-                                     │     Ambulance/Hospital/Patient   │
-                                     │   - exposes /api/* endpoints     │
-                                     │                                  │
-                                     │  Database (server/Database.h/.cpp)│
-                                     │   - persists all state to        │
-                                     │     data/db.json on every write  │
-                                     └──────────────────────────────┘
+│   Builds a graph, queues  │        │   index.html / style.css /     │
+│   patients, dispatches    │        │   app.js  --HTTP/JSON-->        │
+│   by priority, walks a    │        │                                 │
+│   trip through its        │        │  C++ REST API (server/)         │
+│   lifecycle.              │        │   ApiServer.cpp  (main, PORT)   │
+│                            │        │   ApiRoutes.cpp  (all routes)   │
+└────────────┬────────────┘        │   Database.h/.cpp (JSON file)   │
+             │                       └───────────────┬──────────────┘
+             └────────────►  DispatchManager  ◄───────┘
+                             (include/ + src/ core library)
 ```
 
 ### 3.1 Backend (`server/`)
 
-- **`ApiServer.cpp`** — the HTTP server and all REST routes. Uses
-  [cpp-httplib](https://github.com/yhirose/cpp-httplib), a header-only HTTP library
-  (`httplib.h`), so no external server framework needs to be installed.
-- **`Database.h` / `Database.cpp`** — a small persistence layer. Rather than linking
-  against a real SQL library (which is a common source of build failures on Windows/
-  MinGW — missing dev headers, broken linker flags), it reads and writes a single JSON
-  file (`data/db.json`) using [nlohmann/json](https://github.com/nlohmann/json)
-  (`json.hpp`, also header-only). Every mutating API call writes straight through to
-  disk, so data survives server restarts. The class is deliberately isolated behind a
-  small interface (`load()`, `save()`, `data()`) so it could be swapped for a real SQL
-  database later without touching any route-handling code.
-- On each request, `ApiServer` rebuilds a `Graph` object from whatever is currently in
-  the database — keeping the database as the single source of truth rather than trying
-  to keep two copies of the road network in sync.
+- **`ApiServer.cpp`** — `main()`: reads the port from the `PORT` environment variable
+  (default `8080`, invalid values are ignored with a warning), serves `web/`, and starts
+  the server. `./ambulance_server --healthcheck` probes `/api/health` and exits 0/1 (used by
+  the Docker `HEALTHCHECK`).
+- **`ApiRoutes.cpp`** — every `/api/*` route. All input is validated and answered with a
+  JSON `{"error": "..."}` and a `400`/`404`/`409` status — bad input never crashes a request.
+  Routes are in their own file so the tests can start the real API on a random port.
+- **`Database.h` / `Database.cpp`** — a small persistence layer over one JSON file
+  (`data/db.json`, via [nlohmann/json](https://github.com/nlohmann/json)). It creates the
+  `data/` directory if missing, checks that writes succeeded, and saves **atomically**
+  (writes `db.json.tmp`, then renames it over `db.json`) so a crash can't corrupt the data.
+  Older files are migrated on load. It is isolated behind a small interface (`load()`,
+  `save()`, `reset()`, `data()`), so it could be swapped for SQL later.
+- HTTP is provided by [cpp-httplib](https://github.com/yhirose/cpp-httplib) (header-only).
 
 ### 3.2 Frontend (`web/`)
 
-Plain HTML/CSS/JavaScript — no framework, no build step. `app.js` talks to the backend
-with `fetch()` calls to the REST endpoints below, and renders:
-- **Fleet status** — every ambulance, its type, and whether it's available or on call
-- **Road network map** — an SVG rendering of every location and road, with the most
-  recent dispatch's route highlighted
-- **Patient queue** — a form to add patients, and a **Dispatch** button per waiting
-  patient
-- **Dispatch log** — a running history of every dispatch: which patient, which
-  ambulance, the distance traveled, and the route taken
+Plain HTML/CSS/JavaScript — no framework, no build step.
+- **Fleet status** — each ambulance, type, live status (`EN_ROUTE`, `AT_SCENE`, …) and location
+- **Hospitals** — beds free, with a Discharge button
+- **Road network map** — SVG of locations and roads; the selected trip is highlighted leg by
+  leg (ambulance → patient, patient → hospital)
+- **Patient queue** — add patients, dispatch one, or **Dispatch next (by priority)**
+- **Roads** — add a road (from, to, weight, one-way/two-way)
+- **Dispatch log** — hospital, per-leg distance and ETA, status, and Advance / Complete buttons
+- **Reset** — restores the seed data
+- API errors are shown as toast messages; all dynamic text is HTML-escaped.
 
-The server hosts these files itself (`svr.set_mount_point("/", "./web")`), so visiting
-one URL serves the whole app — frontend and backend both.
+`live.html` is a separate real-world map page (OpenStreetMap/Leaflet) with live GPS
+tracking, nearby hospitals and routing. It does not need the backend.
 
 ### 3.3 REST API reference
 
+Errors are always `{"error": "message"}`: **400** invalid input, **404** unknown id,
+**409** conflict (e.g. nothing available, or the thing is in use).
+
 | Method | Endpoint | Description |
 |---|---|---|
+| GET | `/api/health` | Liveness probe `{status:"ok"}` |
+| GET / POST | `/api/config` | Read / set `{speedKmh}` (0 < speed ≤ 300) used for ETAs |
 | GET | `/api/locations` | List all locations |
-| POST | `/api/locations` | Add a location `{name, x, y}` |
+| POST | `/api/locations` | Add a location `{name, x, y}` (non-empty name, numeric x/y) |
+| DELETE | `/api/locations/{id}` | Delete; `409` if a road, ambulance, hospital or patient uses it |
 | GET | `/api/edges` | List all roads |
-| GET | `/api/ambulances` | List fleet + availability |
-| POST | `/api/ambulances` | Add an ambulance `{type, locationId}` |
-| GET | `/api/hospitals` | List hospitals + bed capacity |
-| GET | `/api/patients` | List patient queue |
-| POST | `/api/patients` | Add a patient `{name, locationId, severity}` |
-| GET | `/api/route?from=&to=` | Shortest path between two locations (Dijkstra) |
-| POST | `/api/dispatch` | Dispatch nearest ambulance `{patientId}` |
-| GET | `/api/dispatchlog` | History of all dispatches |
+| POST | `/api/edges` | Add a road `{from, to, weight, bidirectional}` (weight > 0, default two-way) |
+| DELETE | `/api/edges/{from}/{to}` | Delete a road; `409` if an active dispatch uses it |
+| GET | `/api/ambulances` | List fleet with `status` |
+| POST | `/api/ambulances` | Add an ambulance `{type: BASIC\|ADVANCED, locationId}` |
+| DELETE | `/api/ambulances/{id}` | Delete; `409` unless `AVAILABLE` |
+| GET | `/api/hospitals` | List hospitals + bed capacity/occupancy |
+| POST | `/api/hospitals` | Add a hospital `{locationId, capacity}` |
+| DELETE | `/api/hospitals/{id}` | Delete; `409` if beds are occupied or it is an active destination |
+| POST | `/api/hospitals/{id}/discharge` | Free one bed |
+| GET | `/api/patients` | List patients (`WAITING`, `DISPATCHED`, `ADMITTED`) |
+| POST | `/api/patients` | Add a patient `{name, locationId, severity: LOW\|MEDIUM\|HIGH\|CRITICAL}` |
+| DELETE | `/api/patients/{id}` | Delete; `409` while dispatched |
+| GET | `/api/route?from=&to=` | Shortest path + `etaMinutes` (`400` bad ids, `404` unknown ids; `totalDistance` is `-1` when unreachable) |
+| POST | `/api/dispatch` | Dispatch a specific patient `{patientId}` |
+| POST | `/api/dispatch/next` | Dispatch the highest-priority waiting patient |
+| POST | `/api/dispatch/{id}/advance` | Move the trip one lifecycle step |
+| POST | `/api/dispatch/{id}/complete` | Finish the trip: free the ambulance at the hospital, admit the patient |
+| GET | `/api/dispatchlog` | All dispatches |
+| POST | `/api/reset` | Restore the seed data |
+
+A dispatch (log entry) looks like:
+
+```json
+{ "id": 1, "patientId": 2, "ambulanceId": 102, "hospitalId": 1, "status": "EN_ROUTE",
+  "distance": 4.0, "path": [4, 3], "etaMinutes": 6.0,
+  "legs": [ {"type": "TO_PATIENT",  "from": 4, "to": 3, "path": [4, 3], "distance": 4.0, "etaMinutes": 6.0},
+            {"type": "TO_HOSPITAL", "from": 3, "to": 2, "path": [3, 2], "distance": 3.0, "etaMinutes": 4.5} ],
+  "totalDistance": 7.0, "totalEtaMinutes": 10.5, "speedKmh": 40.0, "warning": "" }
+```
+`distance`, `path` and `etaMinutes` at the top level describe the first leg (ambulance → patient),
+which is what the original API returned. `hospitalId` is `null` and `warning` is set when no hospital had a free bed.
 
 ---
 
@@ -211,6 +261,7 @@ RUN g++ -std=c++17 -O2 -static-libgcc -static-libstdc++ ... -o ambulance_server 
 FROM debian:bookworm-slim
 COPY --from=build /app/ambulance_server .
 COPY web/ web/
+HEALTHCHECK ... CMD ["./ambulance_server", "--healthcheck"]
 CMD ["./ambulance_server"]
 ```
 
@@ -251,12 +302,14 @@ means it only depends on `libc`/`libm`, which every Linux base image has.
 ```
 ambulance-route-optimization/
 ├── include/            # shared domain class headers (Location, Graph, Vehicle, ...)
-├── src/                 # domain class implementations + console demo (main.cpp)
-├── server/              # web backend: ApiServer.cpp, Database.h/.cpp, vendored libs
-├── web/                  # browser frontend: index.html, style.css, app.js
-├── data/                 # db.json created here on first server run (gitignored)
-├── Dockerfile            # two-stage build for deployment
-├── CMakeLists.txt        # build config for the console demo
+├── src/                # domain class implementations + console demo (main.cpp)
+├── server/             # ApiServer.cpp (main), ApiRoutes.cpp, Database.h/.cpp, vendored libs
+├── web/                # frontend: index.html/style.css/app.js (console), live.* (GPS map)
+├── tests/              # GoogleTest: test_core.cpp (domain), test_api.cpp (HTTP API)
+├── .github/workflows/  # ci.yml — build + test on every push and pull request
+├── data/               # db.json created here on first server run (gitignored)
+├── Dockerfile          # two-stage build for deployment
+├── CMakeLists.txt      # aro_core library, ambulance_sim, ambulance_server, aro_tests
 ├── README.md
 └── .gitignore
 ```
@@ -265,23 +318,70 @@ ambulance-route-optimization/
 
 ## 6. Building and Running
 
-### Console demo
+Targets: `ambulance_sim` (console demo), `ambulance_server` (REST API + web UI) and
+`aro_tests`. Requires a C++17 compiler (GCC 9+, Clang 10+, or recent MSVC/MinGW) and,
+for CMake builds, CMake 3.14+. Tests download GoogleTest automatically on first configure.
+
+### CMake (Linux / macOS / Windows)
 
 ```bash
-g++ -std=c++17 -Iinclude src/*.cpp -o ambulance_sim
-./ambulance_sim
+cmake -S . -B build                  # add -DARO_BUILD_TESTS=OFF to skip downloading GoogleTest
+cmake --build build -j
+./build/ambulance_sim                # console demo
+./build/ambulance_server             # web app (run from the project root so ./web is found)
 ```
 
-### Web app (local)
+On Windows with Visual Studio the binaries are in `build\Debug\` or `build\Release\`
+(`cmake --build build --config Release`).
+
+### Plain g++ (no CMake)
 
 ```bash
-g++ -std=c++17 -Iinclude -Iserver server/ApiServer.cpp server/Database.cpp \
-    src/Location.cpp src/Graph.cpp src/RouteOptimizer.cpp \
-    -o ambulance_server -lws2_32   # Windows/MinGW — drop -lws2_32 on Linux/macOS
-./ambulance_server
+# Console demo
+g++ -std=c++17 -Wall -Wextra -Iinclude src/*.cpp -o ambulance_sim && ./ambulance_sim
+
+# Web app — Linux / macOS
+g++ -std=c++17 -O2 -Iinclude -Iserver \
+    server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp \
+    $(ls src/*.cpp | grep -v '/main.cpp') -o ambulance_server -lpthread
+PORT=8080 ./ambulance_server         # PORT is optional, default 8080
 ```
 
-Then open **http://localhost:8080**.
+```bat
+:: Web app — Windows (MinGW-w64, cmd.exe)
+g++ -std=c++17 -O2 -D_WIN32_WINNT=0x0A00 -Iinclude -Iserver ^
+    server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp ^
+    src/Location.cpp src/Graph.cpp src/RouteOptimizer.cpp src/Vehicle.cpp src/Ambulance.cpp ^
+    src/Hospital.cpp src/Patient.cpp src/DispatchManager.cpp ^
+    -o ambulance_server.exe -lws2_32
+set PORT=8080 && ambulance_server.exe
+```
+
+Then open **http://localhost:8080** (and **/live.html** for the GPS map).
+
+> The CMake and plain-g++ builds are exercised on Linux (locally and in CI). The macOS and
+> Windows commands follow the same structure but are not run in CI.
+
+### Running the tests
+
+```bash
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure      # or run ./build/aro_tests directly
+```
+
+`test_core.cpp` covers Dijkstra (normal, shorter-of-two, no path, start == end, unknown
+nodes, one-way roads), `Graph`, hospital bed logic, priority ordering, ambulance lifecycle
+and dispatch selection (nearest wins, unavailable skipped, severity preference, hospital
+choice, no-beds case, ETA). `test_api.cpp` starts the real API on a random local port and
+checks validation (400s), 404/409 paths, dispatch/lifecycle flows, deletes, reset, config and
+persistence.
+
+### Docker
+
+```bash
+docker build -t aro .
+docker run -p 8080:8080 aro          # the image has a HEALTHCHECK on /api/health
+```
 
 ### Web app (live)
 
