@@ -22,7 +22,8 @@
   <div class="topbar__status">
     <span id="conn-dot" class="dot dot--pending"></span>
     <span id="conn-text">Connecting to server…</span>
-    <a href="live.html" style="color:#4c9be8;margin-left:16px;text-decoration:none">Live tracking</a>
+    <a href="live.html" class="topbar__link">Live tracking</a>
+    <button type="button" id="reset-btn" class="btn btn--ghost" title="Restore the seed data">Reset data</button>
   </div>
 </header>
 
@@ -35,15 +36,38 @@
 
     <h2>Hospitals</h2>
     <div id="hospital-list" class="list"></div>
+
+    <h2>Settings</h2>
+    <form id="config-form" class="form form--inline">
+      <label>Speed (km/h)
+        <input type="number" id="c-speed" min="1" max="300" step="any" required>
+      </label>
+      <button type="submit" class="btn btn--secondary">Set</button>
+    </form>
   </section>
 
   <!-- CENTER: Map -->
   <section class="panel panel--map">
     <div class="panel__head">
       <h2>Road Network</h2>
-      <span id="route-readout" class="route-readout">No route selected</span>
+      <span id="route-readout" class="route-readout">No dispatch selected</span>
     </div>
-    <svg id="map" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid meet"></svg>
+    <svg id="map" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Road network map"></svg>
+    <div class="legend">
+      <span><i class="swatch swatch--leg1"></i>Ambulance → patient</span>
+      <span><i class="swatch swatch--leg2"></i>Patient → hospital</span>
+      <span><i class="swatch swatch--both"></i>Used by both legs</span>
+      <span><i class="swatch swatch--oneway"></i>→ one-way road</span>
+    </div>
+
+    <h2>Add Road</h2>
+    <form id="edge-form" class="form form--row">
+      <label>From <select id="e-from" required></select></label>
+      <label>To <select id="e-to" required></select></label>
+      <label>Distance (km) <input type="number" id="e-weight" min="0.1" step="any" required placeholder="4.5"></label>
+      <label class="check"><input type="checkbox" id="e-both" checked> Two-way</label>
+      <button type="submit" class="btn btn--secondary">Add road</button>
+    </form>
   </section>
 
   <!-- RIGHT: Patients + dispatch -->
@@ -67,7 +91,10 @@
       <button type="submit" class="btn btn--primary">Add to queue</button>
     </form>
 
-    <h2>Patient Queue</h2>
+    <div class="panel__head">
+      <h2>Patient Queue</h2>
+      <button type="button" id="dispatch-next" class="item__action">Dispatch next (by priority)</button>
+    </div>
     <div id="patient-list" class="list"></div>
   </section>
 
@@ -76,7 +103,7 @@
     <h2>Dispatch Log</h2>
     <table id="log-table">
       <thead>
-        <tr><th>Patient</th><th>Ambulance</th><th>Distance</th><th>Route</th></tr>
+        <tr><th>Patient</th><th>Unit</th><th>Hospital</th><th>Route</th><th>Distance</th><th>ETA</th><th>Status</th><th></th></tr>
       </thead>
       <tbody id="log-body"></tbody>
     </table>
@@ -84,6 +111,7 @@
 
 </main>
 
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

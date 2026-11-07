@@ -1,8 +1,29 @@
-// Works whether you open this file directly (file://) or via the
+// Dispatch console. Works whether you open this file directly (file://) or via the
 // server's own static hosting (http://localhost:8080/).
 const API_BASE = (location.protocol === 'file:') ? 'http://localhost:8080' : '';
+const $ = id => document.getElementById(id);
 
-let state = { locations: [], edges: [], ambulances: [], hospitals: [], patients: [], activePath: [] };
+let state = {
+  locations: [], edges: [], ambulances: [], hospitals: [], patients: [], log: [],
+  config: { speedKmh: 40 }, selectedTrip: null,
+};
+
+// ---------------- helpers ----------------
+
+// Everything that came from the server (names, etc.) goes through esc() before it is put into innerHTML.
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function toast(message, kind = 'error') {
+  const el = document.createElement('div');
+  el.className = `toast toast--${kind}`;
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.textContent = message;                       // textContent: never interpreted as HTML
+  $('toasts').appendChild(el);
+  setTimeout(() => el.remove(), kind === 'error' ? 7000 : 4000);
+}
 
 async function api(path, options) {
   const res = await fetch(API_BASE + path, options);
@@ -12,101 +33,180 @@ async function api(path, options) {
   }
   return res.status === 204 ? null : res.json();
 }
+const post = (path, body = {}) => api(path, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
 
-function setConnection(ok, text) {
-  const dot = document.getElementById('conn-dot');
-  const label = document.getElementById('conn-text');
-  dot.className = 'dot ' + (ok ? 'dot--ok' : 'dot--error');
-  label.textContent = text;
+// Runs a user action: shows API errors as a toast, refreshes the data afterwards.
+async function run(action, successMessage) {
+  try {
+    const result = await action();
+    if (successMessage) toast(successMessage, 'ok');
+    await loadAll();
+    return result;
+  } catch (err) {
+    toast(err.message);
+    return undefined;
+  }
 }
 
-function locationName(id) {
-  const loc = state.locations.find(l => l.id === id);
-  return loc ? loc.name : `#${id}`;
+function setConnection(ok, text) {
+  $('conn-dot').className = 'dot ' + (ok ? 'dot--ok' : 'dot--error');
+  $('conn-text').textContent = text;
+}
+
+const locationName = id => (state.locations.find(l => l.id === id) || {}).name ?? `#${id}`;
+const fmtEta = m => `${Number(m).toFixed(1)} min`;
+const fmtKm = d => `${Number(d).toFixed(1)} km`;
+const isActive = t => t.status !== 'COMPLETED';
+const activeTripOf = ambId => state.log.find(t => t.ambulanceId === ambId && isActive(t));
+const selectedTrip = () => state.log.find(t => t.id === state.selectedTrip);
+
+const STATUS_BADGE = {
+  AVAILABLE: 'badge--available', EN_ROUTE: 'badge--enroute', AT_SCENE: 'badge--scene',
+  TRANSPORTING: 'badge--transport', RETURNING: 'badge--returning', COMPLETED: 'badge--completed',
+};
+const STATUS_LABEL = {
+  AVAILABLE: 'Available', EN_ROUTE: 'En route', AT_SCENE: 'At scene',
+  TRANSPORTING: 'Transporting', RETURNING: 'Returning', COMPLETED: 'Completed',
+};
+const NEXT_STEP_LABEL = {
+  EN_ROUTE: 'Arrived at scene', AT_SCENE: 'Start transport', TRANSPORTING: 'Delivered', RETURNING: 'Back in service',
+};
+const statusBadge = s => `<span class="badge ${STATUS_BADGE[s] || 'badge--busy'}">${esc(STATUS_LABEL[s] || s)}</span>`;
+const severityBadgeClass = sev =>
+  ({ LOW: 'badge--low', MEDIUM: 'badge--medium', HIGH: 'badge--high', CRITICAL: 'badge--critical' }[sev] || 'badge--medium');
+const SEV_RANK = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+
+// Same ordering the server uses: severity, then wait time, then id.
+function byPriority(a, b) {
+  return (SEV_RANK[b.severity] - SEV_RANK[a.severity]) || ((a.createdAt || 0) - (b.createdAt || 0)) || (a.id - b.id);
 }
 
 // ---------------- Rendering ----------------
 
 function renderFleet() {
-  const el = document.getElementById('fleet-list');
+  const el = $('fleet-list');
   if (!state.ambulances.length) { el.innerHTML = '<div class="empty">No ambulances registered.</div>'; return; }
-  el.innerHTML = state.ambulances.map(a => `
+  el.innerHTML = state.ambulances.map(a => {
+    const trip = activeTripOf(a.id);
+    const eta = trip ? ` · ETA ${fmtEta(trip.totalEtaMinutes)}` : '';
+    return `
     <div class="item">
       <div class="item__main">
-        <span class="item__title">Unit ${a.id} · ${a.type}</span>
-        <span class="item__meta">${locationName(a.locationId)}</span>
+        <span class="item__title">Unit ${esc(a.id)} · ${esc(a.type)}</span>
+        <span class="item__meta">${esc(locationName(a.locationId))}${esc(eta)}</span>
       </div>
-      <span class="badge ${a.available ? 'badge--available' : 'badge--busy'}">
-        ${a.available ? 'Available' : 'On call'}
-      </span>
-    </div>
-  `).join('');
+      ${statusBadge(a.status || (a.available ? 'AVAILABLE' : 'EN_ROUTE'))}
+    </div>`;
+  }).join('');
 }
 
 function renderHospitals() {
-  const el = document.getElementById('hospital-list');
+  const el = $('hospital-list');
   if (!state.hospitals.length) { el.innerHTML = '<div class="empty">No hospitals registered.</div>'; return; }
   el.innerHTML = state.hospitals.map(h => `
     <div class="item">
       <div class="item__main">
-        <span class="item__title">${locationName(h.locationId)}</span>
-        <span class="item__meta">${h.capacity - h.occupied} of ${h.capacity} beds free</span>
+        <span class="item__title">${esc(locationName(h.locationId))}</span>
+        <span class="item__meta">${esc(h.capacity - h.occupied)} of ${esc(h.capacity)} beds free</span>
       </div>
-    </div>
-  `).join('');
-}
-
-function severityBadgeClass(sev) {
-  return { LOW: 'badge--low', MEDIUM: 'badge--medium', HIGH: 'badge--high', CRITICAL: 'badge--critical' }[sev] || 'badge--medium';
+      <button class="item__action item__action--ghost" data-discharge="${esc(h.id)}"
+              ${h.occupied > 0 ? '' : 'disabled'}>Discharge</button>
+    </div>`).join('');
+  el.querySelectorAll('[data-discharge]').forEach(btn => btn.addEventListener('click', () =>
+    run(() => post(`/api/hospitals/${btn.dataset.discharge}/discharge`), 'Bed freed')));
 }
 
 function renderPatients() {
-  const el = document.getElementById('patient-list');
-  const waiting = state.patients.filter(p => p.status === 'WAITING');
+  const el = $('patient-list');
   if (!state.patients.length) { el.innerHTML = '<div class="empty">Queue is empty.</div>'; return; }
 
-  el.innerHTML = state.patients.slice().reverse().map(p => `
-    <div class="item">
-      <div class="item__main">
-        <span class="item__title">${p.name}</span>
-        <span class="item__meta">${locationName(p.locationId)}</span>
-      </div>
-      <span class="badge ${severityBadgeClass(p.severity)}">${p.severity}</span>
-      ${p.status === 'WAITING'
-        ? `<button class="item__action" data-dispatch="${p.id}">Dispatch</button>`
-        : `<span class="item__meta">Dispatched</span>`}
-    </div>
-  `).join('');
+  const waiting = state.patients.filter(p => p.status === 'WAITING').sort(byPriority);
+  const others = state.patients.filter(p => p.status !== 'WAITING').reverse();
+  $('dispatch-next').disabled = waiting.length === 0;
 
-  el.querySelectorAll('[data-dispatch]').forEach(btn => {
-    btn.addEventListener('click', () => dispatchPatient(parseInt(btn.dataset.dispatch, 10)));
-  });
+  const row = (p, isNext) => `
+    <div class="item item--stack">
+      <div class="item__main">
+        <span class="item__title">${esc(p.name)}</span>
+        <span class="item__meta">${esc(locationName(p.locationId))}</span>
+      </div>
+      <div class="item__side">
+        ${isNext ? '<span class="badge badge--next">NEXT</span>' : ''}
+        <span class="badge ${severityBadgeClass(p.severity)}">${esc(p.severity)}</span>
+        ${p.status === 'WAITING'
+          ? `<button class="item__action" data-dispatch="${esc(p.id)}">Dispatch</button>`
+          : `<span class="item__meta">${p.status === 'ADMITTED' ? 'Admitted' : 'Dispatched'}</span>`}
+      </div>
+    </div>`;
+  el.innerHTML = waiting.map((p, i) => row(p, i === 0)).join('') + others.map(p => row(p, false)).join('');
+
+  el.querySelectorAll('[data-dispatch]').forEach(btn =>
+    btn.addEventListener('click', () => dispatchPatient(parseInt(btn.dataset.dispatch, 10))));
+}
+
+// Rebuilds a <select> but keeps the user's current choice (the page refreshes every 5 s).
+function fillSelect(select, options) {
+  const previous = select.value;
+  select.innerHTML = options.map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+  if (options.some(o => String(o.value) === previous)) select.value = previous;
 }
 
 function renderLocationOptions() {
-  const select = document.getElementById('p-location');
-  select.innerHTML = state.locations.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+  const opts = state.locations.map(l => ({ value: l.id, label: l.name }));
+  ['p-location', 'e-from', 'e-to'].forEach(id => fillSelect($(id), opts));
+  if (!$('e-to').dataset.touched && opts.length > 1 && $('e-to').value === $('e-from').value) $('e-to').selectedIndex = 1;
 }
 
-function renderLog(log) {
-  const body = document.getElementById('log-body');
-  if (!log.length) { body.innerHTML = '<tr><td colspan="4" class="empty">No dispatches yet.</td></tr>'; return; }
-  body.innerHTML = log.slice().reverse().map(entry => {
-    const patient = state.patients.find(p => p.id === entry.patientId);
-    const pathNames = entry.path.map(locationName).join(' → ');
+function renderLog() {
+  const body = $('log-body');
+  if (!state.log.length) { body.innerHTML = '<tr><td colspan="8" class="empty">No dispatches yet.</td></tr>'; return; }
+  body.innerHTML = state.log.slice().reverse().map(t => {
+    const patient = state.patients.find(p => p.id === t.patientId);
+    const routeText = t.legs.map(l => l.path.map(locationName).join(' → ')).join('  |  ');
+    const legsEta = t.legs.map(l => `${fmtKm(l.distance)} / ${fmtEta(l.etaMinutes)}`).join(' + ');
+    const actions = isActive(t) ? `
+      <div class="log-actions">
+        <button class="item__action item__action--ghost" data-advance="${esc(t.id)}">${esc(NEXT_STEP_LABEL[t.status] || 'Advance')}</button>
+        <button class="item__action" data-complete="${esc(t.id)}">Complete</button>
+      </div>` : '';
     return `
-      <tr>
-        <td>${patient ? patient.name : '#' + entry.patientId}</td>
-        <td>Unit ${entry.ambulanceId}</td>
-        <td>${entry.distance.toFixed(1)}</td>
-        <td>${pathNames}</td>
-      </tr>
-    `;
+      <tr data-trip="${esc(t.id)}" class="${t.id === state.selectedTrip ? 'is-selected' : ''}">
+        <td>${esc(patient ? patient.name : '#' + t.patientId)}</td>
+        <td>Unit ${esc(t.ambulanceId)}</td>
+        <td>${t.hospitalId == null ? '<span class="log-warn">none yet</span>' : esc(locationName((state.hospitals.find(h => h.id === t.hospitalId) || {}).locationId))}</td>
+        <td>${esc(routeText)}${t.warning ? `<span class="log-warn">${esc(t.warning)}</span>` : ''}</td>
+        <td title="${esc(legsEta)}">${esc(fmtKm(t.totalDistance))}</td>
+        <td>${esc(fmtEta(t.totalEtaMinutes))}</td>
+        <td>${statusBadge(t.status)}</td>
+        <td>${actions}</td>
+      </tr>`;
   }).join('');
+
+  body.querySelectorAll('tr[data-trip]').forEach(tr => tr.addEventListener('click', () => {
+    state.selectedTrip = parseInt(tr.dataset.trip, 10);
+    renderLog(); renderMap(); renderReadout();
+  }));
+  body.querySelectorAll('[data-advance]').forEach(btn => btn.addEventListener('click', e => {
+    e.stopPropagation();
+    run(() => post(`/api/dispatch/${btn.dataset.advance}/advance`));
+  }));
+  body.querySelectorAll('[data-complete]').forEach(btn => btn.addEventListener('click', e => {
+    e.stopPropagation();
+    run(() => post(`/api/dispatch/${btn.dataset.complete}/complete`), 'Dispatch completed');
+  }));
+}
+
+function renderReadout() {
+  const t = selectedTrip();
+  $('route-readout').textContent = t
+    ? `Unit ${t.ambulanceId} · ${fmtKm(t.totalDistance)} · ETA ${fmtEta(t.totalEtaMinutes)} · ${STATUS_LABEL[t.status] || t.status}`
+    : 'No dispatch selected';
 }
 
 function renderMap() {
-  const svg = document.getElementById('map');
+  const svg = $('map');
   if (!state.locations.length) { svg.innerHTML = ''; return; }
 
   const xs = state.locations.map(l => l.x), ys = state.locations.map(l => l.y);
@@ -115,104 +215,139 @@ function renderMap() {
   const pad = 60;
   const scaleX = v => pad + (maxX === minX ? 0 : (v - minX) / (maxX - minX)) * (600 - pad * 2);
   const scaleY = v => pad + (maxY === minY ? 0 : (v - minY) / (maxY - minY)) * (340 - pad * 2);
-
   const pos = {};
   state.locations.forEach(l => { pos[l.id] = { x: scaleX(l.x), y: scaleY(l.y) }; });
 
-  const activeEdges = new Set();
-  for (let i = 0; i < state.activePath.length - 1; i++) {
-    activeEdges.add(`${state.activePath[i]}-${state.activePath[i + 1]}`);
-    activeEdges.add(`${state.activePath[i + 1]}-${state.activePath[i]}`);
-  }
+  // Highlight every leg of the selected dispatch: leg 1 (to patient) red, leg 2 (to hospital) green.
+  const edgeKey = (a, b) => (a < b ? `${a}-${b}` : `${b}-${a}`);
+  const leg1 = new Set(), leg2 = new Set();
+  const trip = selectedTrip();
+  if (trip) trip.legs.forEach((leg, idx) => {
+    for (let i = 0; i < leg.path.length - 1; i++) (idx === 0 ? leg1 : leg2).add(edgeKey(leg.path[i], leg.path[i + 1]));
+  });
+
+  const defs = `<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6"
+      orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8b96a5"></path></marker></defs>`;
 
   const edgesSvg = state.edges.map(e => {
     const a = pos[e.from], b = pos[e.to];
     if (!a || !b) return '';
-    const active = activeEdges.has(`${e.from}-${e.to}`);
+    const key = edgeKey(e.from, e.to);
+    const cls = leg1.has(key) && leg2.has(key) ? 'edge--both' : leg1.has(key) ? 'edge--active' : leg2.has(key) ? 'edge--active2' : '';
+    const oneWay = e.bidirectional === false;
+    // Shorten one-way lines so the arrowhead sits at the edge of the destination circle.
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+    const bx = oneWay ? b.x - (dx / len) * 17 : b.x, by = oneWay ? b.y - (dy / len) * 17 : b.y;
     return `
-      <line class="edge ${active ? 'edge--active' : ''}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"></line>
-      <text class="edge-label" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 4}">${e.weight}</text>
-    `;
+      <line class="edge ${cls}" x1="${a.x}" y1="${a.y}" x2="${bx}" y2="${by}" ${oneWay ? 'marker-end="url(#arrow)"' : ''}></line>
+      <text class="edge-label" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 4}">${esc(e.weight)}</text>`;
   }).join('');
 
   const hospitalIds = new Set(state.hospitals.map(h => h.locationId));
-  const stationIds = new Set(state.ambulances.map(a => a.locationId));
+  const unitsAt = {};
+  state.ambulances.forEach(a => { (unitsAt[a.locationId] = unitsAt[a.locationId] || []).push(a.id); });
 
   const nodesSvg = state.locations.map(l => {
     const p = pos[l.id];
-    const cls = hospitalIds.has(l.id) ? 'node node--hospital' : (stationIds.has(l.id) ? 'node node--station' : 'node');
+    const cls = hospitalIds.has(l.id) ? 'node node--hospital' : (unitsAt[l.id] ? 'node node--station' : 'node');
+    const units = unitsAt[l.id] ? `<text class="unit-tag" x="${p.x}" y="${p.y + 44}" text-anchor="middle">${esc(unitsAt[l.id].map(u => 'U' + u).join(' '))}</text>` : '';
     return `
       <g class="${cls}">
         <circle cx="${p.x}" cy="${p.y}" r="16"></circle>
-        <text x="${p.x}" y="${p.y + 32}" text-anchor="middle">${l.name}</text>
-      </g>
-    `;
+        <text x="${p.x}" y="${p.y + 32}" text-anchor="middle">${esc(l.name)}</text>
+        ${units}
+      </g>`;
   }).join('');
 
-  svg.innerHTML = edgesSvg + nodesSvg;
+  svg.innerHTML = defs + edgesSvg + nodesSvg;
 }
 
 function renderAll() {
-  renderFleet();
-  renderHospitals();
-  renderPatients();
-  renderLocationOptions();
-  renderMap();
+  renderFleet(); renderHospitals(); renderPatients(); renderLocationOptions();
+  renderLog(); renderMap(); renderReadout();
+  const speed = $('c-speed');
+  if (document.activeElement !== speed) speed.value = state.config.speedKmh;
 }
 
 // ---------------- Data loading ----------------
 
 async function loadAll() {
-  const [locations, edges, ambulances, hospitals, patients, log] = await Promise.all([
+  const [locations, edges, ambulances, hospitals, patients, log, config] = await Promise.all([
     api('/api/locations'), api('/api/edges'), api('/api/ambulances'),
-    api('/api/hospitals'), api('/api/patients'), api('/api/dispatchlog'),
+    api('/api/hospitals'), api('/api/patients'), api('/api/dispatchlog'), api('/api/config'),
   ]);
-  state = { ...state, locations, edges, ambulances, hospitals, patients };
+  state = { ...state, locations, edges, ambulances, hospitals, patients, log, config };
+  // Keep the selection valid; default to the newest active dispatch.
+  if (!selectedTrip()) {
+    const active = log.filter(isActive);
+    state.selectedTrip = active.length ? active[active.length - 1].id : null;
+  }
   renderAll();
-  renderLog(log);
+  setConnection(true, 'Connected');
 }
+
+// ---------------- Actions ----------------
 
 async function dispatchPatient(patientId) {
-  const readout = document.getElementById('route-readout');
-  try {
-    readout.textContent = 'Dispatching…';
-    const entry = await api('/api/dispatch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ patientId }),
-    });
-    state.activePath = entry.path;
-    readout.textContent = `Unit ${entry.ambulanceId} → ${entry.distance.toFixed(1)} units`;
-    await loadAll();
-    renderMap();
-  } catch (err) {
-    readout.textContent = err.message;
-  }
+  const trip = await run(async () => {
+    const t = await post('/api/dispatch', { patientId });
+    state.selectedTrip = t.id;
+    return t;
+  });
+  reportDispatch(trip);
 }
 
-document.getElementById('patient-form').addEventListener('submit', async (e) => {
+async function dispatchNext() {
+  const trip = await run(async () => {
+    const t = await post('/api/dispatch/next');
+    state.selectedTrip = t.id;
+    return t;
+  });
+  reportDispatch(trip);
+}
+
+function reportDispatch(trip) {
+  if (!trip) return;
+  toast(`Unit ${trip.ambulanceId} dispatched — ETA ${fmtEta(trip.totalEtaMinutes)}`, 'ok');
+  if (trip.warning) toast(trip.warning, 'warn');
+}
+
+$('dispatch-next').addEventListener('click', dispatchNext);
+
+$('patient-form').addEventListener('submit', async e => {
   e.preventDefault();
-  const name = document.getElementById('p-name').value.trim();
-  const locationId = parseInt(document.getElementById('p-location').value, 10);
-  const severity = document.getElementById('p-severity').value;
+  const name = $('p-name').value.trim();
   if (!name) return;
-  try {
-    await api('/api/patients', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, locationId, severity }),
-    });
-    document.getElementById('p-name').value = '';
-    await loadAll();
-  } catch (err) {
-    alert(err.message);
-  }
+  const added = await run(() => post('/api/patients', {
+    name, locationId: parseInt($('p-location').value, 10), severity: $('p-severity').value,
+  }));
+  if (added) $('p-name').value = '';
+});
+
+$('edge-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const added = await run(() => post('/api/edges', {
+    from: parseInt($('e-from').value, 10), to: parseInt($('e-to').value, 10),
+    weight: parseFloat($('e-weight').value), bidirectional: $('e-both').checked,
+  }), 'Road added');
+  if (added) $('e-weight').value = '';
+});
+$('e-to').addEventListener('change', () => { $('e-to').dataset.touched = '1'; });
+
+$('config-form').addEventListener('submit', e => {
+  e.preventDefault();
+  run(() => post('/api/config', { speedKmh: parseFloat($('c-speed').value) }), 'Speed updated');
+});
+
+$('reset-btn').addEventListener('click', async () => {
+  if (!confirm('Reset all data (locations, roads, units, patients and the dispatch log) to the seed data?')) return;
+  state.selectedTrip = null;
+  await run(() => post('/api/reset'), 'Data reset');
 });
 
 async function init() {
   try {
     await loadAll();
-    setConnection(true, 'Connected');
   } catch (err) {
     setConnection(false, 'Cannot reach server — is ambulance_server running?');
   }
