@@ -3,13 +3,15 @@
 
 class Hospital {
 public:
-    Hospital(int id, const Location& loc, int capacity);
+    Hospital(int id, const Location& loc, int capacity, int occupied = 0);
 
     bool admitPatient();  // returns false if full
     void dischargePatient();
 
     int getId() const;
     Location getLocation() const;
+    int getCapacity() const;
+    int getOccupied() const;
     int getAvailableBeds() const;
 
 private:
