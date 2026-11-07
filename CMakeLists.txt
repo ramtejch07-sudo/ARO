@@ -53,6 +53,9 @@ endif()
 if(ARO_BUILD_TESTS)
   enable_testing()
   include(FetchContent)
+  if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)   # use extraction time for downloaded archives
+  endif()
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(googletest
