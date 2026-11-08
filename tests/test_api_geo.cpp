@@ -227,3 +227,60 @@ TEST_F(GeoApiTest, PositionsSurviveARestart) {
     }
     EXPECT_TRUE(found);
 }
+
+// ---------------------------------------------------------------- Phase 3: re-routing
+
+TEST_F(GeoApiTest, RerouteReplacesTheCurrentLegFromTheLatestFix) {
+    int id = addPatient("Reroute me", 9, "MEDIUM");
+    auto [st, trip] = post("/api/dispatch", json{{"patientId", id}}.dump());
+    ASSERT_EQ(st, 201);
+    const int tripId = trip["id"], amb = trip["ambulanceId"];
+    const std::string path = "/api/dispatch/" + std::to_string(tripId) + "/reroute";
+
+    EXPECT_EQ(post("/api/dispatch/999/reroute").first, 404);
+    EXPECT_EQ(post(path).first, 409);                       // no GPS fix yet
+
+    // The unit drifted off to a spot near Ameerpet.
+    ASSERT_EQ(post("/api/ambulances/" + std::to_string(amb) + "/position", R"({"lat":17.4380,"lng":78.4490})").first, 200);
+    auto [rs, re] = post(path);
+    ASSERT_EQ(rs, 200) << re.dump();
+    EXPECT_EQ(re["rerouteCount"], 1);
+    EXPECT_DOUBLE_EQ(re["legs"][0]["geometry"][0][0].get<double>(), 17.438);   // starts at the fix
+    EXPECT_TRUE(re["legs"][0]["rerouted"].get<bool>());
+    EXPECT_EQ(re["legs"].size(), 2u);                       // the hospital leg is untouched
+    EXPECT_EQ(re["status"], "EN_ROUTE");
+    EXPECT_NEAR(re["totalDistance"].get<double>(),
+                re["legs"][0]["distance"].get<double>() + re["legs"][1]["distance"].get<double>(), 1e-9);
+
+    EXPECT_EQ(post(path).second["rerouteCount"], 2);        // can be repeated
+    // A completed trip cannot be re-routed.
+    ASSERT_EQ(post("/api/dispatch/" + std::to_string(tripId) + "/complete").first, 200);
+    EXPECT_EQ(post(path).first, 409);
+}
+
+TEST_F(GeoApiTest, RerouteWhileTransportingReplacesTheHospitalLeg) {
+    int id = addPatient("Transport", 9, "LOW");
+    auto [st, trip] = post("/api/dispatch", json{{"patientId", id}}.dump());
+    ASSERT_EQ(st, 201);
+    const int tripId = trip["id"], amb = trip["ambulanceId"];
+    ASSERT_EQ(post("/api/dispatch/" + std::to_string(tripId) + "/advance").first, 200);   // AT_SCENE
+    ASSERT_EQ(post("/api/dispatch/" + std::to_string(tripId) + "/advance").first, 200);   // TRANSPORTING
+    ASSERT_EQ(post("/api/ambulances/" + std::to_string(amb) + "/position", R"({"lat":17.4300,"lng":78.4600})").first, 200);
+    auto [rs, re] = post("/api/dispatch/" + std::to_string(tripId) + "/reroute");
+    ASSERT_EQ(rs, 200) << re.dump();
+    EXPECT_TRUE(re["legs"][1]["rerouted"].get<bool>());
+    EXPECT_FALSE(re["legs"][0].contains("rerouted"));
+    EXPECT_DOUBLE_EQ(re["legs"][1]["geometry"][0][0].get<double>(), 17.43);
+}
+
+TEST_F(GeoApiTest, ActiveFilterOnTheDispatchLog) {
+    int a = addPatient("A", 9, "LOW"), b = addPatient("B", 10, "LOW");
+    auto [s1, t1] = post("/api/dispatch", json{{"patientId", a}}.dump());
+    auto [s2, t2] = post("/api/dispatch", json{{"patientId", b}}.dump());
+    ASSERT_EQ(s1, 201); ASSERT_EQ(s2, 201);
+    ASSERT_EQ(post("/api/dispatch/" + std::to_string(t1["id"].get<int>()) + "/complete").first, 200);
+    EXPECT_EQ(get("/api/dispatchlog").second.size(), 2u);
+    auto active = get("/api/dispatchlog?active=1").second;
+    ASSERT_EQ(active.size(), 1u);
+    EXPECT_EQ(active[0]["id"], t2["id"]);
+}

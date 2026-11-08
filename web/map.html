@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Map — Ambulance Route Optimization</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="map.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <header class="side__head">
+      <h1>Live dispatch map</h1>
+      <nav><a href="index.html">Console</a> · <a href="driver.html">Driver app</a></nav>
+    </header>
+
+    <div id="conn" class="conn conn--wait"><span class="dot"></span><span id="conn-text">Connecting…</span></div>
+
+    <section class="box">
+      <h2>New emergency</h2>
+      <div class="row">
+        <select id="severity" aria-label="Severity">
+          <option>LOW</option><option selected>MEDIUM</option><option>HIGH</option><option>CRITICAL</option>
+        </select>
+        <button id="btn-pick" class="btn">Click map to add</button>
+      </div>
+      <p id="pick-hint" class="muted" hidden>Click a spot on the map to place the patient.</p>
+      <button id="btn-next" class="btn btn--primary btn--wide">Dispatch next</button>
+      <p id="dispatch-note" class="muted"></p>
+    </section>
+
+    <section class="box">
+      <h2>Active trips <small id="trip-count"></small></h2>
+      <div id="trips" class="list"><div class="empty">No active trips.</div></div>
+    </section>
+
+    <section class="box">
+      <h2>Waiting patients <small id="wait-count"></small></h2>
+      <div id="waiting" class="list"><div class="empty">Nobody is waiting.</div></div>
+    </section>
+
+    <section class="box legend">
+      <h2>Legend</h2>
+      <span class="chip c-AVAILABLE">Available</span><span class="chip c-EN_ROUTE">En route</span>
+      <span class="chip c-AT_SCENE">At scene</span><span class="chip c-TRANSPORTING">Transporting</span>
+      <span class="chip c-RETURNING">Returning</span>
+      <p class="muted">Faded marker = no GPS fix in the last 60 s (shown at its station).</p>
+    </section>
+  </aside>
+  <div id="map"></div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="map.js"></script>
+</body>
+</html>

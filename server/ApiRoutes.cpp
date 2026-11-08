@@ -670,6 +670,43 @@ void registerRoutes(httplib::Server& svr, Database& db, std::shared_ptr<RoutingP
     svr.Post(R"(/api/dispatch/(\d+)/complete)", route(db, [&db, primary](auto& req, auto& res, json& d) {
         setJson(res, runTripStep(db, d, pathId(req, 1), true, primary));
     }));
+    // Re-routes an active trip from the ambulance's latest GPS fix (it left its planned route).
+    // EN_ROUTE replaces the leg to the patient, TRANSPORTING the leg to the hospital.
+    svr.Post(R"(/api/dispatch/(\d+)/reroute)", route(db, [&db, primary](auto& req, auto& res, json& d) {
+        json* trip = findById(d["dispatchLog"], pathId(req, 1));
+        if (!trip) throw ApiError{404, "dispatch not found"};
+        const std::string status = (*trip)["status"].get<std::string>();
+        if (status != "EN_ROUTE" && status != "TRANSPORTING")
+            throw ApiError{409, "only an ambulance that is driving (EN_ROUTE or TRANSPORTING) can be re-routed"};
+        const size_t legIdx = status == "EN_ROUTE" ? 0 : 1;
+        if ((*trip)["legs"].size() <= legIdx) throw ApiError{409, "this trip has no hospital leg yet"};
+
+        const int ambId = (*trip)["ambulanceId"].get<int>();
+        json* amb = findById(d["ambulances"], ambId);
+        const long long now = static_cast<long long>(std::time(nullptr));
+        if (!amb || !amb->contains("position") || now - (*amb)["position"].value("updatedAt", 0LL) > kPositionFreshSeconds)
+            throw ApiError{409, "the ambulance has no GPS position from the last 60 seconds"};
+
+        DispatchManager mgr = buildManager(d, primary);
+        RouteLeg leg;
+        std::string err;
+        if (!mgr.routeFromAmbulance(ambId, (*trip)["legs"][legIdx]["to"].get<int>(), leg, err))
+            throw ApiError{409, "no route from the current position: " + err};
+
+        (*trip)["legs"][legIdx] = legToJson(legIdx == 0 ? "TO_PATIENT" : "TO_HOSPITAL", leg);
+        (*trip)["legs"][legIdx]["rerouted"] = true;
+        if (legIdx == 0) {
+            (*trip)["distance"] = leg.distance;
+            (*trip)["path"] = leg.path;
+            (*trip)["etaMinutes"] = leg.etaMinutes;
+        }
+        (*trip)["rerouteCount"] = (*trip).value("rerouteCount", 0) + 1;
+        (*trip)["lastRerouteAt"] = now;
+        refreshTotals(*trip);
+        commit(db);
+        setJson(res, *trip);
+    }));
+
     // GET /api/dispatchlog            -> every trip
     // GET /api/dispatchlog?active=1   -> only trips that are not COMPLETED (what the live map polls)
     svr.Get("/api/dispatchlog", route(db, [](auto& req, auto& res, json& d) {
