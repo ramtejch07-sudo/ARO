@@ -29,7 +29,7 @@ jobs:
       - name: Build server
         run: >
           g++ -std=c++17 -O2 -Iinclude -Iserver
-          server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp
+          server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp server/OsrmRoutingProvider.cpp
           $(ls src/*.cpp | grep -v '/main.cpp')
           -o ambulance_server -lpthread
       - name: Smoke test the server

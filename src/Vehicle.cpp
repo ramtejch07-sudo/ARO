@@ -43,3 +43,10 @@ bool Vehicle::advanceStatus() {
 Location Vehicle::getCurrentLocation() const { return currentLocation; }
 void Vehicle::setCurrentLocation(const Location& loc) { currentLocation = loc; }
 int Vehicle::getId() const { return id; }
+
+void Vehicle::setLivePosition(const LivePosition& p) { live = p; liveSet = true; }
+bool Vehicle::hasLivePosition() const { return liveSet; }
+const LivePosition& Vehicle::getLivePosition() const { return live; }
+bool Vehicle::hasFreshPosition(long long now, long long maxAgeSeconds) const {
+    return liveSet && now - live.timestamp <= maxAgeSeconds && live.timestamp - now <= maxAgeSeconds;
+}

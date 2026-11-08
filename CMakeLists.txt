@@ -32,7 +32,7 @@ target_compile_options(ambulance_sim PRIVATE ${ARO_WARNINGS})
 # ---- REST API ----
 if(ARO_BUILD_SERVER OR ARO_BUILD_TESTS)
   find_package(Threads REQUIRED)
-  add_library(aro_api STATIC server/ApiRoutes.cpp server/Database.cpp)
+  add_library(aro_api STATIC server/ApiRoutes.cpp server/Database.cpp server/OsrmRoutingProvider.cpp)
   # SYSTEM: don't show -Wall noise from the vendored single-header libraries (httplib, json).
   target_include_directories(aro_api SYSTEM PUBLIC server)
   target_link_libraries(aro_api PUBLIC aro_core Threads::Threads)
@@ -62,7 +62,8 @@ if(ARO_BUILD_TESTS)
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip)
   FetchContent_MakeAvailable(googletest)
 
-  add_executable(aro_tests tests/test_core.cpp tests/test_api.cpp)
+  add_executable(aro_tests tests/test_core.cpp tests/test_api.cpp tests/test_api_geo.cpp tests/test_routing.cpp)
+  target_include_directories(aro_tests PRIVATE tests)
   target_link_libraries(aro_tests PRIVATE aro_api GTest::gtest_main)
   target_compile_options(aro_tests PRIVATE ${ARO_WARNINGS})
 

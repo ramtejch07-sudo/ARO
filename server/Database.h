@@ -13,9 +13,14 @@ using json = nlohmann::json;
 //
 // Locking: load() takes the mutex itself. save() and reset() do NOT - callers
 // (the API routes) already hold getMutex() while they mutate data().
+// Which data a fresh database starts with.
+//  HYDERABAD: real coordinates (3 hospitals, 5 ambulances, 8 sample sites) - the default.
+//  LEGACY:    the original 4-node abstract graph (kept for the unit tests).
+enum class SeedProfile { HYDERABAD, LEGACY };
+
 class Database {
 public:
-    explicit Database(const std::string& filePath);
+    explicit Database(const std::string& filePath, SeedProfile profile = SeedProfile::HYDERABAD);
 
     // Loads the JSON file into memory. Creates the data directory if needed and seeds
     // default data if the file is missing or unreadable. Older files are migrated in place.
@@ -33,12 +38,16 @@ public:
 
     std::mutex& getMutex();
 
-    static json defaultSeedData();
+    static json defaultSeedData();   // = hyderabadSeedData()
+    static json hyderabadSeedData();
+    static json legacySeedData();
 
 private:
     std::string filePath;
+    SeedProfile profile;
     json db;
     std::mutex mtx;
 
     void migrate();
+    json seed() const;
 };

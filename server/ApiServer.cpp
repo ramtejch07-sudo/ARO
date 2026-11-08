@@ -2,8 +2,10 @@
 // Serves the REST API (see ApiRoutes.cpp) and the static dispatch console in ./web.
 //
 // Build:   g++ -std=c++17 -Iinclude -Iserver server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp
-//              $(ls src/*.cpp | grep -v main.cpp) -o ambulance_server -lpthread
+//              server/OsrmRoutingProvider.cpp $(ls src/*.cpp | grep -v main.cpp) -o ambulance_server -lpthread
 // Run:     PORT=8080 ./ambulance_server        (PORT is optional, default 8080)
+//          OSRM_URL=http://router.project-osrm.org   real-road routing server (default shown);
+//          OSRM_URL=off  disables it and routes on the stored graph only.
 // Then open http://localhost:8080/
 //
 // Health probe (used by the Docker HEALTHCHECK):  ./ambulance_server --healthcheck
@@ -11,6 +13,7 @@
 #include "httplib.h"
 #include "ApiRoutes.h"
 #include "Database.h"
+#include "OsrmRoutingProvider.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -42,8 +45,19 @@ int main(int argc, char** argv) {
     Database dbase("data/db.json");
     dbase.load();
 
+    // Real-road routing (OSRM). If it is unreachable at request time, dispatch falls back to the graph.
+    std::shared_ptr<RoutingProvider> osrm;
+    const char* osrmEnv = std::getenv("OSRM_URL");
+    const std::string osrmUrl = (osrmEnv && *osrmEnv) ? osrmEnv : "http://router.project-osrm.org";
+    if (osrmUrl != "off") {
+        osrm = std::make_shared<OsrmRoutingProvider>(osrmUrl);
+        std::cout << "Routing: OSRM at " << osrmUrl << " (graph fallback if unreachable)\n";
+    } else {
+        std::cout << "Routing: stored graph only (OSRM_URL=off)\n";
+    }
+
     httplib::Server svr;
-    registerRoutes(svr, dbase);
+    registerRoutes(svr, dbase, osrm);
 
     // Serve the frontend directly so the student can just hit http://localhost:<port>/
     if (!svr.set_mount_point("/", "./web")) {

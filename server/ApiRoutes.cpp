@@ -7,6 +7,7 @@
 
 #include "ApiRoutes.h"
 #include "DispatchManager.h"
+#include "GeoGraph.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -110,6 +111,17 @@ std::string optionalString(const json& b, const char* key, const std::string& fa
     return b.at(key).get<std::string>();
 }
 
+// Optional "lat"/"lng" pair: both or neither. Returns true when present (and valid).
+bool optionalLatLng(const json& b, double& lat, double& lng) {
+    const bool hasLat = b.contains("lat"), hasLng = b.contains("lng");
+    if (!hasLat && !hasLng) return false;
+    if (!hasLat || !hasLng) throw ApiError{400, "'lat' and 'lng' must be given together"};
+    lat = requireNumber(b, "lat");
+    lng = requireNumber(b, "lng");
+    if (!validLatLng(lat, lng)) throw ApiError{400, "'lat' must be between -90 and 90 and 'lng' between -180 and 180"};
+    return true;
+}
+
 json* findById(json& arr, int id) {
     for (auto& item : arr) if (item.at("id").get<int>() == id) return &item;
     return nullptr;
@@ -123,14 +135,66 @@ int nextId(json& arr, int minimum) {
     return id;
 }
 
+Location locationFromJson(const json& loc) {
+    const int id = loc.at("id").get<int>();
+    const std::string name = loc.at("name").get<std::string>();
+    const double x = loc.at("x").get<double>(), y = loc.at("y").get<double>();
+    if (loc.contains("lat") && loc.contains("lng"))
+        return Location(id, name, x, y, loc["lat"].get<double>(), loc["lng"].get<double>());
+    return Location(id, name, x, y);
+}
+
+// Adds a location at real coordinates and (by default) links it to its nearest neighbours, so the
+// graph fallback can route to and from it. Returns the stored location.
+json createGeoLocation(json& d, const std::string& name, double lat, double lng, bool autoConnect) {
+    json loc = {{"id", nextId(d["locations"], 1)}, {"name", name}, {"x", lng}, {"y", -lat}, {"lat", lat}, {"lng", lng}};
+    if (autoConnect) {
+        std::vector<Location> existing;
+        for (auto& l : d["locations"]) existing.push_back(locationFromJson(l));
+        for (const RoadEdge& e : connectToNearest(locationFromJson(loc), existing))
+            d["edges"].push_back({{"from", e.from}, {"to", e.to}, {"weight", e.km}, {"bidirectional", true}});
+    }
+    d["locations"].push_back(loc);
+    return loc;
+}
+
+// A hospital/ambulance/patient is placed either at an existing location (locationId) or at
+// coordinates (lat + lng, which creates a location there). Returns the location id.
+// Request-shape check only (changes nothing): exactly one of locationId / lat+lng, coordinates valid.
+bool checkPlacementShape(const json& b) {
+    double lat = 0, lng = 0;
+    const bool geo = optionalLatLng(b, lat, lng);
+    const bool hasId = b.contains("locationId");
+    if (geo && hasId) throw ApiError{400, "give either 'locationId' or 'lat'/'lng', not both"};
+    if (!geo && !hasId) throw ApiError{400, "'locationId' (or 'lat' and 'lng') is required"};
+    return geo;
+}
+
+int resolvePlacement(json& d, const json& b, const std::string& newName, json* createdLoc = nullptr) {
+    double lat = 0, lng = 0;
+    const bool geo = checkPlacementShape(b);
+    if (geo) {
+        optionalLatLng(b, lat, lng);
+        json loc = createGeoLocation(d, newName, lat, lng, optionalBool(b, "autoConnect", true));
+        if (createdLoc) *createdLoc = loc;
+        return loc["id"].get<int>();
+    }
+    int locId = requireInt(b, "locationId");
+    if (!locationExists(d, locId)) throw ApiError{400, "'locationId' does not refer to an existing location"};
+    return locId;
+}
+
+// Copies a location's name/coordinates onto a hospital/ambulance/patient record.
+void addCoordinates(json& record, json& d, int locId) {
+    if (json* l = findById(d["locations"], locId))
+        if (l->contains("lat") && l->contains("lng")) { record["lat"] = (*l)["lat"]; record["lng"] = (*l)["lng"]; }
+}
+
 // ------------------------------------------------------- JSON <-> domain objects
 
 Graph buildGraph(json& data) {
     Graph g;
-    for (auto& loc : data["locations"]) {
-        g.addLocation(Location(loc.at("id").get<int>(), loc.at("name").get<std::string>(),
-                               loc.at("x").get<double>(), loc.at("y").get<double>()));
-    }
+    for (auto& loc : data["locations"]) g.addLocation(locationFromJson(loc));
     for (auto& e : data["edges"]) {
         g.addEdge(e.at("from").get<int>(), e.at("to").get<int>(), e.at("weight").get<double>(),
                   e.value("bidirectional", true));
@@ -153,7 +217,7 @@ Patient patientFromJson(const json& p, const Graph& g) {
 }
 
 // Hydrates the shared domain model from the stored state.
-DispatchManager buildManager(json& data) {
+DispatchManager buildManager(json& data, const std::shared_ptr<RoutingProvider>& primary) {
     Graph g = buildGraph(data);
 
     std::vector<std::shared_ptr<Ambulance>> fleet;
@@ -164,6 +228,15 @@ DispatchManager buildManager(json& data) {
         VehicleStatus st = VehicleStatus::AVAILABLE;
         parseVehicleStatus(a.value("status", "AVAILABLE"), st);
         amb->setStatus(st);
+        if (a.contains("position") && a["position"].is_object()) {
+            const json& p = a["position"];
+            LivePosition lp;
+            lp.pos = {p.value("lat", 0.0), p.value("lng", 0.0)};
+            lp.speedKmh = p.value("speed", 0.0);
+            lp.headingDeg = p.value("heading", 0.0);
+            lp.timestamp = p.value("updatedAt", 0LL);
+            amb->setLivePosition(lp);
+        }
         fleet.push_back(amb);
     }
 
@@ -175,6 +248,8 @@ DispatchManager buildManager(json& data) {
 
     double speed = data["config"].value("speedKmh", 40.0);
     DispatchManager mgr(g, fleet, hospitals, speed);
+    // "graph" in the config forces graph-only routing; "auto" prefers the real-road provider.
+    if (primary && data["config"].value("provider", "auto") != "graph") mgr.setPrimaryProvider(primary);
 
     for (auto& p : data["patients"]) {
         if (p.value("status", "WAITING") == "WAITING") mgr.enqueue(patientFromJson(p, mgr.getGraph()));
@@ -189,6 +264,10 @@ void syncManager(json& data, const DispatchManager& mgr) {
             (*a)["status"] = toString(amb->getStatus());
             (*a)["available"] = amb->isAvailable();
             (*a)["locationId"] = amb->getCurrentLocation().getId();
+            if (amb->getCurrentLocation().hasGeo()) {
+                (*a)["lat"] = amb->getCurrentLocation().getLat();
+                (*a)["lng"] = amb->getCurrentLocation().getLng();
+            }
         }
     }
     for (const auto& h : mgr.getHospitals()) {
@@ -197,8 +276,11 @@ void syncManager(json& data, const DispatchManager& mgr) {
 }
 
 json legToJson(const char* type, const RouteLeg& l) {
+    json geometry = json::array();
+    for (const GeoPoint& p : l.geometry) geometry.push_back({p.lat, p.lng});
     return {{"type", type}, {"from", l.fromId}, {"to", l.toId}, {"path", l.path},
-            {"distance", l.distance}, {"etaMinutes", l.etaMinutes}};
+            {"distance", l.distance}, {"etaMinutes", l.etaMinutes}, {"durationSec", l.durationSec},
+            {"provider", l.provider}, {"geometry", geometry}};
 }
 
 void refreshTotals(json& trip) {
@@ -215,6 +297,8 @@ json makeTrip(int id, const DispatchResult& r, double speed) {
                  {"distance", r.toPatient.distance}, {"path", r.toPatient.path},
                  {"etaMinutes", r.toPatient.etaMinutes},
                  {"legs", json::array()}, {"speedKmh", speed}, {"warning", r.warning},
+                 {"provider", r.provider}, {"fallbackReason", r.fallbackReason},
+                 {"hospitalOverflow", r.hospitalOverflow}, {"rerouteCount", 0},
                  {"dispatchedAt", static_cast<long long>(std::time(nullptr))}, {"completedAt", nullptr}};
     trip["legs"].push_back(legToJson("TO_PATIENT", r.toPatient));
     if (r.hospitalId >= 0) {
@@ -226,8 +310,8 @@ json makeTrip(int id, const DispatchResult& r, double speed) {
 }
 
 // Dispatches `patientId`, or the highest-priority waiting patient when patientId < 0.
-json runDispatch(Database& db, json& data, int patientId) {
-    DispatchManager mgr = buildManager(data);
+json runDispatch(Database& db, json& data, int patientId, const std::shared_ptr<RoutingProvider>& primary) {
+    DispatchManager mgr = buildManager(data, primary);
     DispatchResult r;
     if (patientId < 0) {
         if (mgr.waitingCount() == 0) throw ApiError{404, "no waiting patients"};
@@ -255,12 +339,12 @@ json runDispatch(Database& db, json& data, int patientId) {
 }
 
 // advance one lifecycle step, or complete the trip outright
-json runTripStep(Database& db, json& data, int tripId, bool complete) {
+json runTripStep(Database& db, json& data, int tripId, bool complete, const std::shared_ptr<RoutingProvider>& primary) {
     json* trip = findById(data["dispatchLog"], tripId);
     if (!trip) throw ApiError{404, "dispatch not found"};
     if ((*trip)["status"] == "COMPLETED") throw ApiError{409, "dispatch is already completed"};
 
-    DispatchManager mgr = buildManager(data);
+    DispatchManager mgr = buildManager(data, primary);
     const int ambId = (*trip)["ambulanceId"].get<int>();
     const int sceneId = (*trip)["legs"][0]["to"].get<int>();
     const int hospId = (*trip)["hospitalId"].is_null() ? -1 : (*trip)["hospitalId"].get<int>();
@@ -280,6 +364,7 @@ json runTripStep(Database& db, json& data, int tripId, bool complete) {
     }
     if (step.status == VehicleStatus::AVAILABLE) {
         (*trip)["status"] = "COMPLETED";
+        for (auto& leg : (*trip)["legs"]) leg["geometry"] = json::array();   // keeps the log small
         (*trip)["completedAt"] = static_cast<long long>(std::time(nullptr));
         if (patient) (*patient)["status"] = "ADMITTED"; // stays in the hospital until discharged
     } else {
@@ -309,7 +394,7 @@ bool hasActiveTrip(json& data, const std::function<bool(const json&)>& pred) {
 
 // ------------------------------------------------------------------ routes
 
-void registerRoutes(httplib::Server& svr, Database& db) {
+void registerRoutes(httplib::Server& svr, Database& db, std::shared_ptr<RoutingProvider> primary) {
     // Allow the frontend (opened as a plain file, or served from another port) to call this API.
     svr.set_default_headers({
         {"Access-Control-Allow-Origin", "*"},
@@ -319,16 +404,26 @@ void registerRoutes(httplib::Server& svr, Database& db) {
     svr.Options(R"(/api/.*)", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
     svr.Get("/api/health", [](const httplib::Request&, httplib::Response& res) {
-        setJson(res, {{"status", "ok"}});
+        setJson(res, {{"status", "ok"}, {"time", static_cast<long long>(std::time(nullptr))}});
     });
 
     // ---- Config ----
     svr.Get("/api/config", route(db, [](auto&, auto& res, json& d) { setJson(res, d["config"]); }));
+    // speedKmh: speed of the graph provider. provider: "auto" (real roads, graph as fallback) or "graph".
     svr.Post("/api/config", route(db, [&db](auto& req, auto& res, json& d) {
         json b = parseBody(req);
-        double speed = requireNumber(b, "speedKmh");
-        if (speed <= 0 || speed > 300) throw ApiError{400, "'speedKmh' must be between 0 and 300"};
-        d["config"]["speedKmh"] = speed;
+        if (!b.contains("speedKmh") && !b.contains("provider"))
+            throw ApiError{400, "give 'speedKmh' and/or 'provider'"};
+        if (b.contains("speedKmh")) {
+            double speed = requireNumber(b, "speedKmh");
+            if (speed <= 0 || speed > 300) throw ApiError{400, "'speedKmh' must be between 0 and 300"};
+            d["config"]["speedKmh"] = speed;
+        }
+        if (b.contains("provider")) {
+            std::string provider = optionalString(b, "provider", "auto");
+            if (provider != "auto" && provider != "graph") throw ApiError{400, "'provider' must be auto or graph"};
+            d["config"]["provider"] = provider;
+        }
         commit(db);
         setJson(res, d["config"]);
     }));
@@ -337,9 +432,22 @@ void registerRoutes(httplib::Server& svr, Database& db) {
     svr.Get("/api/locations", route(db, [](auto&, auto& res, json& d) { setJson(res, d["locations"]); }));
     svr.Post("/api/locations", route(db, [&db](auto& req, auto& res, json& d) {
         json b = parseBody(req);
-        json loc = {{"id", nextId(d["locations"], 1)}, {"name", requireName(b, "name")},
-                    {"x", requireNumber(b, "x")}, {"y", requireNumber(b, "y")}};
-        d["locations"].push_back(loc);
+        std::string name = requireName(b, "name");
+        double lat = 0, lng = 0;
+        const bool geo = optionalLatLng(b, lat, lng);
+        if (!geo && (!b.contains("x") || !b.contains("y")))
+            throw ApiError{400, "give 'x' and 'y' (abstract map) or 'lat' and 'lng' (real place)"};
+        json loc;
+        if (geo) {
+            // x/y default to lng/-lat so the abstract console map still shows the place.
+            loc = createGeoLocation(d, name, lat, lng, optionalBool(b, "autoConnect", true));
+            if (b.contains("x")) loc["x"] = requireNumber(b, "x");
+            if (b.contains("y")) loc["y"] = requireNumber(b, "y");
+            d["locations"].back() = loc;
+        } else {
+            loc = {{"id", nextId(d["locations"], 1)}, {"name", name}, {"x", requireNumber(b, "x")}, {"y", requireNumber(b, "y")}};
+            d["locations"].push_back(loc);
+        }
         commit(db);
         setJson(res, loc, 201);
     }));
@@ -399,10 +507,11 @@ void registerRoutes(httplib::Server& svr, Database& db) {
         AmbulanceType type;
         if (!parseAmbulanceType(optionalString(b, "type", "BASIC"), type))
             throw ApiError{400, "'type' must be BASIC or ADVANCED"};
-        int locId = requireInt(b, "locationId");
-        if (!locationExists(d, locId)) throw ApiError{400, "'locationId' does not refer to an existing location"};
-        json amb = {{"id", nextId(d["ambulances"], 101)}, {"type", toString(type)}, {"locationId", locId},
+        const int ambId = nextId(d["ambulances"], 101);
+        int locId = resolvePlacement(d, b, "Station of unit " + std::to_string(ambId));
+        json amb = {{"id", ambId}, {"type", toString(type)}, {"locationId", locId},
                     {"status", "AVAILABLE"}, {"available", true}};
+        addCoordinates(amb, d, locId);
         d["ambulances"].push_back(amb);
         commit(db);
         setJson(res, amb, 201);
@@ -422,11 +531,21 @@ void registerRoutes(httplib::Server& svr, Database& db) {
     svr.Get("/api/hospitals", route(db, [](auto&, auto& res, json& d) { setJson(res, d["hospitals"]); }));
     svr.Post("/api/hospitals", route(db, [&db](auto& req, auto& res, json& d) {
         json b = parseBody(req);
-        int locId = requireInt(b, "locationId"), capacity = requireInt(b, "capacity");
-        if (!locationExists(d, locId)) throw ApiError{400, "'locationId' does not refer to an existing location"};
+        int capacity = requireInt(b, "capacity");
         if (capacity < 1 || capacity > 10000) throw ApiError{400, "'capacity' must be between 1 and 10000"};
-        for (auto& h : d["hospitals"]) if (h["locationId"] == locId) throw ApiError{409, "a hospital already exists at this location"};
-        json h = {{"id", nextId(d["hospitals"], 1)}, {"locationId", locId}, {"capacity", capacity}, {"occupied", 0}};
+        // Validate first (a bad request must not leave a stray location behind).
+        checkPlacementShape(b);
+        if (b.contains("locationId")) {
+            int existing = requireInt(b, "locationId");
+            for (auto& h : d["hospitals"]) if (h["locationId"] == existing) throw ApiError{409, "a hospital already exists at this location"};
+        }
+        std::string hospName = b.contains("name") ? requireName(b, "name") : "Hospital";
+        int locId = resolvePlacement(d, b, hospName);
+        json* loc = findById(d["locations"], locId);
+        json h = {{"id", nextId(d["hospitals"], 1)}, {"locationId", locId},
+                  {"name", b.contains("name") ? json(hospName) : (*loc)["name"]},
+                  {"capacity", capacity}, {"occupied", 0}};
+        addCoordinates(h, d, locId);
         d["hospitals"].push_back(h);
         commit(db);
         setJson(res, h, 201);
@@ -444,10 +563,10 @@ void registerRoutes(httplib::Server& svr, Database& db) {
         setJson(res, {{"deleted", id}});
     }));
     // Frees one bed (a patient leaves the hospital).
-    svr.Post(R"(/api/hospitals/(\d+)/discharge)", route(db, [&db](auto& req, auto& res, json& d) {
+    svr.Post(R"(/api/hospitals/(\d+)/discharge)", route(db, [&db, primary](auto& req, auto& res, json& d) {
         int id = pathId(req, 1);
         if (!findById(d["hospitals"], id)) throw ApiError{404, "hospital not found"};
-        DispatchManager mgr = buildManager(d);
+        DispatchManager mgr = buildManager(d, primary);
         if (!mgr.dischargeFromHospital(id)) throw ApiError{409, "hospital has no patients to discharge"};
         syncManager(d, mgr);
         commit(db);
@@ -459,14 +578,15 @@ void registerRoutes(httplib::Server& svr, Database& db) {
     svr.Post("/api/patients", route(db, [&db](auto& req, auto& res, json& d) {
         json b = parseBody(req);
         std::string name = requireName(b, "name");
-        int locId = requireInt(b, "locationId");
-        if (!locationExists(d, locId)) throw ApiError{400, "'locationId' does not refer to an existing location"};
         Severity sev;
         if (!parseSeverity(optionalString(b, "severity", "MEDIUM"), sev))
             throw ApiError{400, "'severity' must be LOW, MEDIUM, HIGH or CRITICAL"};
+        checkPlacementShape(b);                     // validate before anything is stored
+        int locId = resolvePlacement(d, b, "Incident: " + name);   // a map click sends lat/lng
         int id = d["nextPatientId"].get<int>();
         json p = {{"id", id}, {"name", name}, {"locationId", locId}, {"severity", toString(sev)},
                   {"status", "WAITING"}, {"createdAt", static_cast<long long>(std::time(nullptr))}};
+        addCoordinates(p, d, locId);
         d["patients"].push_back(p);
         d["nextPatientId"] = id + 1;
         commit(db);
@@ -499,19 +619,19 @@ void registerRoutes(httplib::Server& svr, Database& db) {
 
     // ---- Dispatch ----
     // POST /api/dispatch {patientId}: nearest suitable ambulance -> patient -> nearest hospital with a bed.
-    svr.Post("/api/dispatch", route(db, [&db](auto& req, auto& res, json& d) {
+    svr.Post("/api/dispatch", route(db, [&db, primary](auto& req, auto& res, json& d) {
         json b = parseBody(req);
-        setJson(res, runDispatch(db, d, requireInt(b, "patientId")), 201);
+        setJson(res, runDispatch(db, d, requireInt(b, "patientId"), primary), 201);
     }));
     // POST /api/dispatch/next: serves the highest-priority waiting patient (severity, then wait time).
-    svr.Post("/api/dispatch/next", route(db, [&db](auto&, auto& res, json& d) {
-        setJson(res, runDispatch(db, d, -1), 201);
+    svr.Post("/api/dispatch/next", route(db, [&db, primary](auto&, auto& res, json& d) {
+        setJson(res, runDispatch(db, d, -1, primary), 201);
     }));
-    svr.Post(R"(/api/dispatch/(\d+)/advance)", route(db, [&db](auto& req, auto& res, json& d) {
-        setJson(res, runTripStep(db, d, pathId(req, 1), false));
+    svr.Post(R"(/api/dispatch/(\d+)/advance)", route(db, [&db, primary](auto& req, auto& res, json& d) {
+        setJson(res, runTripStep(db, d, pathId(req, 1), false, primary));
     }));
-    svr.Post(R"(/api/dispatch/(\d+)/complete)", route(db, [&db](auto& req, auto& res, json& d) {
-        setJson(res, runTripStep(db, d, pathId(req, 1), true));
+    svr.Post(R"(/api/dispatch/(\d+)/complete)", route(db, [&db, primary](auto& req, auto& res, json& d) {
+        setJson(res, runTripStep(db, d, pathId(req, 1), true, primary));
     }));
     svr.Get("/api/dispatchlog", route(db, [](auto&, auto& res, json& d) { setJson(res, d["dispatchLog"]); }));
 

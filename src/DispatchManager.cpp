@@ -1,4 +1,5 @@
 #include "DispatchManager.h"
+#include <ctime>
 
 double DispatchResult::totalDistance() const {
     return toPatient.distance + (hospitalId >= 0 ? toHospital.distance : 0.0);
@@ -10,94 +11,178 @@ double DispatchResult::totalEtaMinutes() const {
 DispatchManager::DispatchManager(Graph graph, std::vector<std::shared_ptr<Ambulance>> fleet,
                                  std::vector<Hospital> hospitals, double speedKmh)
     : graph(std::move(graph)), fleet(std::move(fleet)), hospitals(std::move(hospitals)),
-      speedKmh(speedKmh > 0 ? speedKmh : 40.0) {}
+      speedKmh(speedKmh > 0 ? speedKmh : 40.0),
+      clock([] { return static_cast<long long>(std::time(nullptr)); }) {
+    graphProvider = std::make_shared<GraphRoutingProvider>(this->graph, this->speedKmh);
+}
 
-void DispatchManager::setSpeedKmh(double kmh) { if (kmh > 0) speedKmh = kmh; }
+void DispatchManager::setSpeedKmh(double kmh) {
+    if (kmh > 0) { speedKmh = kmh; graphProvider->setSpeedKmh(kmh); }
+}
 double DispatchManager::getSpeedKmh() const { return speedKmh; }
+void DispatchManager::setPrimaryProvider(std::shared_ptr<RoutingProvider> provider) { primary = std::move(provider); }
+void DispatchManager::setClock(std::function<long long()> c) { if (c) clock = std::move(c); }
 
 void DispatchManager::enqueue(const Patient& patient) { waiting.push(patient); }
 size_t DispatchManager::waitingCount() const { return waiting.size(); }
 
-RouteLeg DispatchManager::makeLeg(int fromId, int toId, const RouteResult& r) const {
+// ---------------- routing helpers ----------------
+
+Waypoint DispatchManager::locationWaypoint(const Location& loc) const {
+    Waypoint w;
+    w.locationId = loc.getId();
+    if (loc.hasGeo()) { w.pos = loc.geo(); w.hasPos = true; }
+    return w;
+}
+
+// A unit with a fresh GPS fix is routed from where it really is; otherwise from its station/location.
+Waypoint DispatchManager::ambulanceWaypoint(const Ambulance& amb) const {
+    Waypoint w = locationWaypoint(amb.getCurrentLocation());
+    if (amb.hasFreshPosition(clock(), kPositionFreshSeconds)) {
+        w.pos = amb.getLivePosition().pos;
+        w.hasPos = true;
+        w.live = true;
+    }
+    return w;
+}
+
+MatrixResult DispatchManager::matrix(const std::vector<Waypoint>& from, const std::vector<Waypoint>& to) const {
+    if (primary) {
+        MatrixResult m = primary->durationMatrix(from, to);
+        if (m.ok && m.seconds.size() == from.size()) return m;
+        if (fallbackNote.empty())
+            fallbackNote = primary->name() + " unavailable" + (m.error.empty() ? "" : ": " + m.error);
+    }
+    return graphProvider->durationMatrix(from, to);
+}
+
+RouteInfo DispatchManager::routeBetween(const Waypoint& from, const Waypoint& to) const {
+    if (primary) {
+        RouteInfo r = primary->route(from, to);
+        if (r.ok) return r;
+        if (fallbackNote.empty())
+            fallbackNote = primary->name() + " unavailable" + (r.error.empty() ? "" : ": " + r.error);
+    }
+    return graphProvider->route(from, to);
+}
+
+std::string DispatchManager::providerUsed() const {
+    return (primary && fallbackNote.empty()) ? primary->name() : "graph";
+}
+
+RouteLeg DispatchManager::legFromRoute(int fromId, int toId, const RouteInfo& r) const {
     RouteLeg leg;
     leg.fromId = fromId;
     leg.toId = toId;
-    leg.path = r.path;
-    leg.distance = r.totalDistance;
-    leg.etaMinutes = r.totalDistance / speedKmh * 60.0; // distance units are km, speed is km/h
+    leg.path = r.path.empty() ? std::vector<int>{fromId, toId} : r.path;
+    leg.distance = r.distanceKm;
+    leg.durationSec = r.durationSec;
+    leg.etaMinutes = r.durationSec / 60.0;
+    leg.geometry = decimate(r.geometry, 400);
+    leg.provider = r.provider;
     return leg;
 }
 
-// Picks the nearest AVAILABLE ambulance (by road distance). HIGH/CRITICAL patients try
-// ADVANCED units first and fall back to BASIC if none can reach them.
-std::shared_ptr<Ambulance> DispatchManager::selectAmbulance(const Patient& patient, RouteResult& out,
-                                                            std::string& whyNot) const {
-    RouteOptimizer optimizer(graph);
-    const int sceneId = patient.getLocation().getId();
+// Leg known only by its travel time (a route lookup failed after the matrix succeeded).
+RouteLeg DispatchManager::legFromEta(int fromId, int toId, double seconds, const std::string& provider) const {
+    RouteLeg leg;
+    leg.fromId = fromId;
+    leg.toId = toId;
+    leg.path = {fromId, toId};
+    leg.durationSec = seconds;
+    leg.etaMinutes = seconds / 60.0;
+    leg.distance = seconds / 3600.0 * speedKmh;
+    leg.provider = provider;
+    return leg;
+}
 
-    auto nearest = [&](bool advancedOnly) {
+RouteLeg DispatchManager::buildLeg(const Waypoint& from, const Waypoint& to, int fromId, int toId, double etaSec,
+                                   const std::string& etaProvider) const {
+    if (primary && etaProvider == primary->name()) {
+        RouteInfo r = primary->route(from, to);
+        if (r.ok) return legFromRoute(fromId, toId, r);
+        if (fallbackNote.empty())
+            fallbackNote = primary->name() + " route lookup failed" + (r.error.empty() ? "" : ": " + r.error);
+        return legFromEta(fromId, toId, etaSec, etaProvider);
+    }
+    RouteInfo r = graphProvider->route(from, to);
+    return r.ok ? legFromRoute(fromId, toId, r) : legFromEta(fromId, toId, etaSec, etaProvider);
+}
+
+// Picks the AVAILABLE ambulance with the shortest travel time to the patient (from the routing
+// provider). HIGH/CRITICAL patients try ADVANCED units first and fall back to BASIC.
+std::shared_ptr<Ambulance> DispatchManager::selectAmbulance(const Patient& patient, double& etaSec,
+                                                            std::string& etaProvider, std::string& whyNot) const {
+    std::vector<std::shared_ptr<Ambulance>> free;
+    for (const auto& amb : fleet) if (amb->isAvailable()) free.push_back(amb);
+    if (free.empty()) { whyNot = "no available ambulance"; return nullptr; }
+
+    std::vector<Waypoint> sources;
+    for (const auto& amb : free) sources.push_back(ambulanceWaypoint(*amb));
+    MatrixResult m = matrix(sources, {locationWaypoint(patient.getLocation())});
+    etaProvider = m.provider;
+
+    auto fastest = [&](bool advancedOnly) -> std::shared_ptr<Ambulance> {
         std::shared_ptr<Ambulance> pick;
-        for (const auto& amb : fleet) {
-            if (!amb->isAvailable()) continue;
-            if (advancedOnly && amb->getType() != AmbulanceType::ADVANCED) continue;
-            RouteResult r = optimizer.findShortestPath(amb->getCurrentLocation().getId(), sceneId);
-            if (r.totalDistance >= 0 && (!pick || r.totalDistance < out.totalDistance)) {
-                pick = amb;
-                out = r;
-            }
+        for (size_t i = 0; i < free.size(); ++i) {
+            if (advancedOnly && free[i]->getType() != AmbulanceType::ADVANCED) continue;
+            double secs = m.seconds[i][0];
+            if (secs >= 0 && (!pick || secs < etaSec)) { pick = free[i]; etaSec = secs; }
         }
         return pick;
     };
 
     if (patient.requiresAdvancedSupport()) {
-        if (auto adv = nearest(true)) return adv;
+        if (auto adv = fastest(true)) return adv;
     }
-    if (auto any = nearest(false)) return any;
-
-    bool anyFree = false;
-    for (const auto& amb : fleet) anyFree = anyFree || amb->isAvailable();
-    whyNot = anyFree ? "no available ambulance can reach the patient" : "no available ambulance";
+    if (auto any = fastest(false)) return any;
+    whyNot = "no available ambulance can reach the patient";
     return nullptr;
 }
 
-// Nearest hospital (by road distance from fromId) that still has a free bed. Reserves the bed.
-Hospital* DispatchManager::reserveNearestHospital(int fromId, RouteLeg& leg) {
-    RouteOptimizer optimizer(graph);
-    Hospital* best = nullptr;
-    RouteResult bestRoute{{}, -1.0};
-    for (auto& h : hospitals) {
-        if (h.getAvailableBeds() <= 0) continue;
-        RouteResult r = optimizer.findShortestPath(fromId, h.getLocation().getId());
-        if (r.totalDistance >= 0 && (!best || r.totalDistance < bestRoute.totalDistance)) {
-            best = &h;
-            bestRoute = r;
-        }
+// Hospital with the shortest travel time from the scene that still has a free bed. Reserves the bed.
+Hospital* DispatchManager::reserveNearestHospital(int sceneId, RouteLeg& leg, bool* overflow) {
+    if (overflow) *overflow = false;
+    if (hospitals.empty() || !graph.hasLocation(sceneId)) return nullptr;
+    const Waypoint scene = locationWaypoint(graph.getLocation(sceneId));
+    std::vector<Waypoint> targets;
+    for (const auto& h : hospitals) targets.push_back(locationWaypoint(h.getLocation()));
+    MatrixResult m = matrix({scene}, targets);
+
+    int bestAny = -1, bestFree = -1;
+    for (size_t j = 0; j < hospitals.size(); ++j) {
+        double secs = m.seconds[0][j];
+        if (secs < 0) continue;
+        if (bestAny < 0 || secs < m.seconds[0][static_cast<size_t>(bestAny)]) bestAny = static_cast<int>(j);
+        if (hospitals[j].getAvailableBeds() > 0 &&
+            (bestFree < 0 || secs < m.seconds[0][static_cast<size_t>(bestFree)])) bestFree = static_cast<int>(j);
     }
-    if (!best || !best->admitPatient()) return nullptr;
-    leg = makeLeg(fromId, best->getLocation().getId(), bestRoute);
-    return best;
+    // The closest hospital by travel time is full (or none has room): that is an overflow.
+    if (overflow) *overflow = bestAny >= 0 && bestFree != bestAny;
+    if (bestFree < 0) return nullptr;
+
+    Hospital* h = &hospitals[static_cast<size_t>(bestFree)];
+    if (!h->admitPatient()) return nullptr;
+    const int hospLoc = h->getLocation().getId();
+    leg = buildLeg(scene, targets[static_cast<size_t>(bestFree)], sceneId, hospLoc,
+                   m.seconds[0][static_cast<size_t>(bestFree)], m.provider);
+    return h;
 }
 
-DispatchResult DispatchManager::dispatchPatient(const Patient& patient) {
+DispatchResult DispatchManager::startDispatch(const Patient& patient, const std::shared_ptr<Ambulance>& amb,
+                                              double etaSec, const std::string& etaProvider) {
     DispatchResult result;
     result.patientId = patient.getId();
     const int sceneId = patient.getLocation().getId();
-
-    if (!graph.hasLocation(sceneId)) {
-        result.error = "patient location is not on the road network";
-        return result;
-    }
-
-    RouteResult toScene{{}, -1.0};
-    std::shared_ptr<Ambulance> amb = selectAmbulance(patient, toScene, result.error);
-    if (!amb) return result;
-
     result.ambulanceId = amb->getId();
-    result.toPatient = makeLeg(amb->getCurrentLocation().getId(), sceneId, toScene);
+
+    const Waypoint from = ambulanceWaypoint(*amb), scene = locationWaypoint(patient.getLocation());
+    const int fromId = amb->getCurrentLocation().getId();
+    result.toPatient = buildLeg(from, scene, fromId, sceneId, etaSec, etaProvider);
 
     // Reserve the bed now so two simultaneous emergencies cannot be promised the same last bed.
     RouteLeg hospLeg;
-    if (Hospital* h = reserveNearestHospital(sceneId, hospLeg)) {
+    if (Hospital* h = reserveNearestHospital(sceneId, hospLeg, &result.hospitalOverflow)) {
         result.hospitalId = h->getId();
         result.toHospital = hospLeg;
     } else {
@@ -107,7 +192,42 @@ DispatchResult DispatchManager::dispatchPatient(const Patient& patient) {
 
     amb->dispatch(patient.getLocation());
     result.success = true;
+    result.provider = providerUsed();
+    result.fallbackReason = fallbackNote;
     return result;
+}
+
+DispatchResult DispatchManager::dispatchPatient(const Patient& patient) {
+    fallbackNote.clear();
+    DispatchResult result;
+    result.patientId = patient.getId();
+    const int sceneId = patient.getLocation().getId();
+
+    if (!graph.hasLocation(sceneId)) {
+        result.error = "patient location is not on the road network";
+        return result;
+    }
+
+    double etaSec = -1.0;
+    std::string etaProvider;
+    std::shared_ptr<Ambulance> amb = selectAmbulance(patient, etaSec, etaProvider, result.error);
+    if (!amb) {
+        result.provider = providerUsed();
+        result.fallbackReason = fallbackNote;
+        return result;
+    }
+    return startDispatch(patient, amb, etaSec, etaProvider);
+}
+
+bool DispatchManager::routeFromAmbulance(int ambulanceId, int destLocationId, RouteLeg& out, std::string& error) {
+    fallbackNote.clear();
+    auto amb = findAmbulance(ambulanceId);
+    if (!amb) { error = "ambulance not found"; return false; }
+    if (!graph.hasLocation(destLocationId)) { error = "destination is not on the road network"; return false; }
+    RouteInfo r = routeBetween(ambulanceWaypoint(*amb), locationWaypoint(graph.getLocation(destLocationId)));
+    if (!r.ok) { error = r.error.empty() ? "no route found" : r.error; return false; }
+    out = legFromRoute(amb->getCurrentLocation().getId(), destLocationId, r);
+    return true;
 }
 
 DispatchResult DispatchManager::dispatchNext() {
@@ -130,6 +250,7 @@ std::shared_ptr<Ambulance> DispatchManager::handleEmergency(const Patient& patie
 
 bool DispatchManager::ensureHospital(int sceneId, TripStep& step) {
     if (step.hospitalId >= 0) return true;
+    fallbackNote.clear();
     RouteLeg leg;
     Hospital* h = reserveNearestHospital(sceneId, leg);
     if (!h) {

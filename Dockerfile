@@ -6,7 +6,7 @@ COPY src/ src/
 COPY server/ server/
 # Core sources = everything in src/ except the console demo's main.cpp
 RUN g++ -std=c++17 -O2 -static-libgcc -static-libstdc++ -Iinclude -Iserver \
-    server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp \
+    server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp server/OsrmRoutingProvider.cpp \
     $(ls src/*.cpp | grep -v '/main.cpp') \
     -o ambulance_server -lpthread
 

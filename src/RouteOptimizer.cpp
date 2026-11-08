@@ -52,3 +52,26 @@ RouteResult RouteOptimizer::findShortestPath(int startId, int endId) const {
 
     return {path, dist[endId]};
 }
+
+std::unordered_map<int, double> RouteOptimizer::shortestDistancesFrom(int startId) const {
+    std::unordered_map<int, double> dist;
+    if (!graph.hasLocation(startId)) return dist;
+    using PQItem = std::pair<double, int>;
+    std::priority_queue<PQItem, std::vector<PQItem>, std::greater<>> pq;
+    dist[startId] = 0.0;
+    pq.push({0.0, startId});
+    while (!pq.empty()) {
+        auto [d, u] = pq.top();
+        pq.pop();
+        if (d > dist[u]) continue;
+        for (const Edge& e : graph.getNeighbors(u)) {
+            double nd = d + e.weight;
+            auto it = dist.find(e.destId);
+            if (it == dist.end() || nd < it->second) {
+                dist[e.destId] = nd;
+                pq.push({nd, e.destId});
+            }
+        }
+    }
+    return dist;
+}
