@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <functional>
@@ -501,7 +502,43 @@ void registerRoutes(httplib::Server& svr, Database& db, std::shared_ptr<RoutingP
     }));
 
     // ---- Ambulances ----
-    svr.Get("/api/ambulances", route(db, [](auto&, auto& res, json& d) { setJson(res, d["ambulances"]); }));
+    // Each unit also carries "effective": where dispatch treats it as being right now - its live
+    // GPS fix if that is fresher than 60 s ("source":"live"), otherwise its station/location.
+    svr.Get("/api/ambulances", route(db, [](auto&, auto& res, json& d) {
+        const long long now = static_cast<long long>(std::time(nullptr));
+        json out = json::array();
+        for (auto& a : d["ambulances"]) {
+            json item = a;
+            json eff = {{"source", "station"}, {"lat", a.value("lat", 0.0)}, {"lng", a.value("lng", 0.0)}};
+            if (a.contains("position") && a["position"].is_object()) {
+                const json& p = a["position"];
+                const long long age = now - p.value("updatedAt", 0LL);
+                item["positionAgeSec"] = age;
+                if (age >= 0 && age <= kPositionFreshSeconds)
+                    eff = {{"source", "live"}, {"lat", p.value("lat", 0.0)}, {"lng", p.value("lng", 0.0)}};
+            }
+            item["effective"] = eff;
+            out.push_back(item);
+        }
+        setJson(res, out);
+    }));
+    // Live GPS fix from the driver's phone: {lat, lng, speed (km/h, optional), heading (deg, optional)}.
+    svr.Post(R"(/api/ambulances/(\d+)/position)", route(db, [&db](auto& req, auto& res, json& d) {
+        int id = pathId(req, 1);
+        json* a = findById(d["ambulances"], id);
+        if (!a) throw ApiError{404, "ambulance not found"};
+        json b = parseBody(req);
+        double lat = requireNumber(b, "lat"), lng = requireNumber(b, "lng");
+        if (!validLatLng(lat, lng)) throw ApiError{400, "'lat' must be between -90 and 90 and 'lng' between -180 and 180"};
+        double speed = b.contains("speed") && !b["speed"].is_null() ? requireNumber(b, "speed") : 0.0;
+        double heading = b.contains("heading") && !b["heading"].is_null() ? requireNumber(b, "heading") : 0.0;
+        if (!std::isfinite(speed) || speed < 0 || speed > 400) throw ApiError{400, "'speed' must be between 0 and 400 km/h"};
+        if (!std::isfinite(heading) || heading < 0 || heading > 360) throw ApiError{400, "'heading' must be between 0 and 360 degrees"};
+        (*a)["position"] = {{"lat", lat}, {"lng", lng}, {"speed", speed}, {"heading", heading},
+                            {"updatedAt", static_cast<long long>(std::time(nullptr))}};
+        commit(db);
+        setJson(res, (*a)["position"]);
+    }));
     svr.Post("/api/ambulances", route(db, [&db](auto& req, auto& res, json& d) {
         json b = parseBody(req);
         AmbulanceType type;
@@ -633,7 +670,14 @@ void registerRoutes(httplib::Server& svr, Database& db, std::shared_ptr<RoutingP
     svr.Post(R"(/api/dispatch/(\d+)/complete)", route(db, [&db, primary](auto& req, auto& res, json& d) {
         setJson(res, runTripStep(db, d, pathId(req, 1), true, primary));
     }));
-    svr.Get("/api/dispatchlog", route(db, [](auto&, auto& res, json& d) { setJson(res, d["dispatchLog"]); }));
+    // GET /api/dispatchlog            -> every trip
+    // GET /api/dispatchlog?active=1   -> only trips that are not COMPLETED (what the live map polls)
+    svr.Get("/api/dispatchlog", route(db, [](auto& req, auto& res, json& d) {
+        if (req.get_param_value("active") != "1") return setJson(res, d["dispatchLog"]);
+        json out = json::array();
+        for (auto& t : d["dispatchLog"]) if (t["status"] != "COMPLETED") out.push_back(t);
+        setJson(res, out);
+    }));
 
     // ---- Reset to seed data ----
     svr.Post("/api/reset", route(db, [&db](auto&, auto& res, json&) {

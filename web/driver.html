@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Driver — Ambulance Route Optimization</title>
+<link rel="stylesheet" href="driver.css">
+</head>
+<body>
+<main class="driver">
+  <header>
+    <h1>Driver app</h1>
+    <nav><a href="map.html">Live map</a> · <a href="index.html">Console</a></nav>
+  </header>
+
+  <p id="secure-warning" class="banner banner--warn" hidden>
+    GPS only works on <b>https://</b> pages or on <b>localhost</b>. This page is on plain http, so the
+    browser will refuse to share your location. Use the simulation below, or open the page over https.
+  </p>
+
+  <section class="card">
+    <label for="amb">Your ambulance</label>
+    <select id="amb"></select>
+    <p id="amb-info" class="muted"></p>
+  </section>
+
+  <section class="card">
+    <h2>Real GPS</h2>
+    <button id="btn-gps" class="btn btn--primary">Start</button>
+    <dl class="kv">
+      <dt>GPS</dt><dd id="gps-status">off</dd>
+      <dt>Accuracy</dt><dd id="gps-acc">–</dd>
+      <dt>Server</dt><dd id="srv-status"><span id="srv-dot" class="dot"></span> <span id="srv-text">not sending</span></dd>
+      <dt>Last sent</dt><dd id="last-sent">–</dd>
+    </dl>
+    <p class="muted">Sends your position every 3 seconds while running. Keep this page open and the screen on.</p>
+  </section>
+
+  <section class="card">
+    <h2>Simulate driving</h2>
+    <p class="muted">No phone needed: the ambulance drives its assigned route by itself, and the trip moves
+       through scene → hospital automatically.</p>
+    <label for="speed">Simulation speed: <b id="speed-val">120</b> km/h</label>
+    <input id="speed" type="range" min="10" max="400" step="10" value="120">
+    <div class="row">
+      <button id="btn-sim" class="btn btn--primary">Start simulation</button>
+      <button id="btn-off" class="btn" disabled title="Moves the ambulance ~400 m off its planned route (to demo re-routing)">Go off route</button>
+    </div>
+    <dl class="kv">
+      <dt>Trip</dt><dd id="sim-trip">none (waiting for a dispatch)</dd>
+      <dt>Position</dt><dd id="sim-pos">–</dd>
+    </dl>
+  </section>
+
+  <p id="error" class="banner banner--err" role="alert" hidden></p>
+</main>
+<script src="driver.js"></script>
+</body>
+</html>

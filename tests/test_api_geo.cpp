@@ -149,3 +149,81 @@ TEST_F(GeoApiWithProvider, ConfigCanForceTheGraphProvider) {
     EXPECT_EQ(trip["fallbackReason"], "");                 // chosen, not a failure
     EXPECT_EQ(provider->matrixCalls, 0);
 }
+
+// ---------------------------------------------------------------- Phase 2: live positions
+
+namespace {
+// Gachibowli Flyover is location 12 in the seed.
+const char* kAtGachibowli = R"({"lat":17.4401,"lng":78.3489,"speed":42.5,"heading":270})";
+}
+
+TEST_F(GeoApiTest, PositionEndpointValidatesInput) {
+    EXPECT_EQ(post("/api/ambulances/999/position", kAtGachibowli).first, 404);
+    EXPECT_EQ(post("/api/ambulances/103/position", "not json").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":17.4})").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":"17.4","lng":78.3})").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":91,"lng":78.3})").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":17.4,"lng":-181})").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":17.4,"lng":78.3,"speed":-5})").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":17.4,"lng":78.3,"heading":400})").first, 400);
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":17.4,"lng":78.3,"speed":"fast"})").first, 400);
+    for (auto& a : get("/api/ambulances").second) EXPECT_FALSE(a.contains("position"));   // nothing stored
+}
+
+TEST_F(GeoApiTest, PositionIsStoredWithATimestampAndShownAsEffective) {
+    auto before = get("/api/ambulances").second;
+    for (auto& a : before) EXPECT_EQ(a["effective"]["source"], "station");
+
+    auto [st, pos] = post("/api/ambulances/103/position", kAtGachibowli);
+    ASSERT_EQ(st, 200);
+    EXPECT_DOUBLE_EQ(pos["speed"].get<double>(), 42.5);
+    EXPECT_GT(pos["updatedAt"].get<long long>(), 1700000000LL);
+
+    for (auto& a : get("/api/ambulances").second) {
+        if (a["id"] != 103) { EXPECT_EQ(a["effective"]["source"], "station"); continue; }
+        EXPECT_EQ(a["effective"]["source"], "live");
+        EXPECT_DOUBLE_EQ(a["effective"]["lat"].get<double>(), 17.4401);
+        EXPECT_LE(a["positionAgeSec"].get<long long>(), 2);
+    }
+    // speed and heading are optional
+    EXPECT_EQ(post("/api/ambulances/103/position", R"({"lat":17.4401,"lng":78.3489})").first, 200);
+}
+
+TEST_F(GeoApiTest, DispatchRoutesFromTheFreshGpsFixNotFromTheStation) {
+    // Unit 103's station (LB Nagar) is across the city from Gachibowli, but it just reported a fix there.
+    ASSERT_EQ(post("/api/ambulances/103/position", kAtGachibowli).first, 200);
+    int id = addPatient("Near the fix", 12, "MEDIUM");
+    auto [st, trip] = post("/api/dispatch", json{{"patientId", id}}.dump());
+    ASSERT_EQ(st, 201) << trip.dump();
+    EXPECT_EQ(trip["ambulanceId"], 103);
+    EXPECT_LT(trip["legs"][0]["distance"].get<double>(), 1.0);        // it was already there
+    EXPECT_EQ(trip["legs"][0]["geometry"][0][0].get<double>(), 17.4401);   // polyline starts at the GPS fix
+}
+
+TEST_F(GeoApiTest, AStaleFixIsIgnored) {
+    ASSERT_EQ(post("/api/ambulances/103/position", kAtGachibowli).first, 200);
+    {   // age the fix by two minutes (the 60 s freshness window has passed)
+        std::lock_guard<std::mutex> lock(db->getMutex());
+        for (auto& a : db->data()["ambulances"])
+            if (a["id"] == 103) a["position"]["updatedAt"] = a["position"]["updatedAt"].get<long long>() - 120;
+    }
+    for (auto& a : get("/api/ambulances").second) {
+        if (a["id"] == 103) { EXPECT_EQ(a["effective"]["source"], "station"); }
+    }
+
+    int id = addPatient("Near the old fix", 12, "MEDIUM");
+    auto [st, trip] = post("/api/dispatch", json{{"patientId", id}}.dump());
+    ASSERT_EQ(st, 201) << trip.dump();
+    EXPECT_NE(trip["ambulanceId"], 103);                   // HITEC City (102) is nearer than LB Nagar's station
+}
+
+TEST_F(GeoApiTest, PositionsSurviveARestart) {
+    ASSERT_EQ(post("/api/ambulances/104/position", kAtGachibowli).first, 200);
+    Database again((dir / "data" / "db.json").string());
+    again.load();
+    bool found = false;
+    for (auto& a : again.data()["ambulances"]) {
+        if (a["id"] == 104) found = a.contains("position") && a["position"]["lat"] == 17.4401;
+    }
+    EXPECT_TRUE(found);
+}
