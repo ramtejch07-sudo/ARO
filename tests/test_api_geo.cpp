@@ -1,5 +1,6 @@
 // API tests for real coordinates, provider reporting and the Hyderabad seed.
 #include "api_fixture.h"
+#include <set>
 #include "fake_provider.h"
 
 namespace {
@@ -283,4 +284,62 @@ TEST_F(GeoApiTest, ActiveFilterOnTheDispatchLog) {
     auto active = get("/api/dispatchlog?active=1").second;
     ASSERT_EQ(active.size(), 1u);
     EXPECT_EQ(active[0]["id"], t2["id"]);
+}
+
+// ---------------------------------------------------------------- Phase 4: batch dispatch
+
+TEST_F(GeoApiTest, BatchDispatchAssignsEveryWaitingPatientADistinctAmbulance) {
+    EXPECT_EQ(post("/api/dispatch/batch").first, 404);       // nobody waiting
+    int a = addPatient("A", 12, "MEDIUM"), b = addPatient("B", 14, "MEDIUM"), c = addPatient("C", 16, "LOW");
+    auto [st, out] = post("/api/dispatch/batch");
+    ASSERT_EQ(st, 201) << out.dump();
+    ASSERT_EQ(out["trips"].size(), 3u);
+    EXPECT_TRUE(out["unassigned"].empty());
+    EXPECT_GT(out["totalWeightedCostSec"].get<double>(), 0.0);
+    EXPECT_EQ(out["provider"], "graph");
+    std::set<int> units;
+    for (auto& t : out["trips"]) { units.insert(t["ambulanceId"].get<int>()); EXPECT_EQ(t["status"], "EN_ROUTE"); }
+    EXPECT_EQ(units.size(), 3u);
+    for (int id : {a, b, c}) {
+        for (auto& p : get("/api/patients").second) if (p["id"] == id) { EXPECT_EQ(p["status"], "DISPATCHED"); }
+    }
+    EXPECT_EQ(get("/api/dispatchlog").second.size(), 3u);
+}
+
+TEST_F(GeoApiTest, BatchDispatchWithMorePatientsThanUnitsServesTheMostSevere) {
+    std::vector<int> ids;
+    for (int i = 0; i < 4; ++i) ids.push_back(addPatient("low" + std::to_string(i), 9 + i, "LOW"));
+    int crit = addPatient("critical", 16, "CRITICAL");         // far corner of the city
+    int high = addPatient("high", 15, "HIGH");
+    auto [st, out] = post("/api/dispatch/batch");
+    ASSERT_EQ(st, 201) << out.dump();
+    EXPECT_EQ(out["trips"].size(), 5u);                       // only 5 ambulances exist
+    ASSERT_EQ(out["unassigned"].size(), 1u);
+    std::set<int> served;
+    for (auto& t : out["trips"]) served.insert(t["patientId"].get<int>());
+    EXPECT_TRUE(served.count(crit));
+    EXPECT_TRUE(served.count(high));
+    EXPECT_FALSE(served.count(out["unassigned"][0].get<int>()));
+    // The leftover patient is still WAITING and a second batch finds no free ambulance.
+    auto [st2, err] = post("/api/dispatch/batch");
+    EXPECT_EQ(st2, 409);
+    EXPECT_EQ(err["error"], "no available ambulance");
+}
+
+TEST_F(GeoApiTest, BatchDispatchIsNotTheDefaultAndGreedyStillWorks) {
+    int a = addPatient("A", 12, "MEDIUM");
+    addPatient("B", 14, "MEDIUM");
+    auto [st, trip] = post("/api/dispatch/next");              // one at a time
+    ASSERT_EQ(st, 201);
+    EXPECT_EQ(trip["patientId"], a);
+    EXPECT_EQ(get("/api/dispatchlog").second.size(), 1u);
+}
+
+TEST_F(GeoApiWithProvider, BatchUsesTheProviderEtaMatrix) {
+    addPatient("A", 9, "MEDIUM");
+    addPatient("B", 10, "MEDIUM");
+    auto [st, out] = post("/api/dispatch/batch");
+    ASSERT_EQ(st, 201) << out.dump();
+    EXPECT_EQ(out["provider"], "fake");
+    EXPECT_EQ(provider->matrixCalls >= 1, true);
 }

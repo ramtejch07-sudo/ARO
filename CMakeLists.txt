@@ -62,7 +62,7 @@ if(ARO_BUILD_TESTS)
     URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip)
   FetchContent_MakeAvailable(googletest)
 
-  add_executable(aro_tests tests/test_core.cpp tests/test_api.cpp tests/test_api_geo.cpp tests/test_routing.cpp)
+  add_executable(aro_tests tests/test_core.cpp tests/test_api.cpp tests/test_api_geo.cpp tests/test_routing.cpp tests/test_batch.cpp)
   target_include_directories(aro_tests PRIVATE tests)
   target_link_libraries(aro_tests PRIVATE aro_api GTest::gtest_main)
   target_compile_options(aro_tests PRIVATE ${ARO_WARNINGS})

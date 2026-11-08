@@ -47,6 +47,21 @@ struct DispatchResult {
     double totalEtaMinutes() const;
 };
 
+// Outcome of dispatching all waiting patients at once (Hungarian assignment).
+struct BatchResult {
+    std::string error;                        // set when nothing could be done (no patients / no free unit)
+    std::vector<DispatchResult> dispatched;   // in priority order
+    std::vector<int> unassignedPatientIds;    // still waiting (more patients than free ambulances, or unreachable)
+    double totalWeightedCostSec = 0.0;        // sum of severity weight x (ETA + advanced-support penalty) of the chosen pairs
+    std::string provider = "graph";
+    std::string fallbackReason;
+};
+
+// Severity weights used by the batch assignment: a CRITICAL minute counts 8x a LOW minute.
+double severityWeight(Severity s);
+// Extra "seconds" charged when a HIGH/CRITICAL patient would get a BASIC unit (soft version of the greedy rule).
+constexpr double kBasicForCriticalPenaltySec = 600.0;
+
 // Result of moving a trip forward (advance / complete).
 struct TripStep {
     bool ok = false;
@@ -85,6 +100,12 @@ public:
     // Dispatches the highest-priority waiting patient. The patient leaves the queue only on
     // success, so a failed dispatch (e.g. no free unit) keeps them first in line.
     DispatchResult dispatchNext();
+
+    // Dispatches ALL waiting patients at once, pairing them with the free ambulances so that the
+    // total severity-weighted response time is minimal (Hungarian algorithm on the ETA matrix).
+    // The greedy dispatchNext() stays the default; this is the global-optimum alternative.
+    // If patients outnumber free units, the most severe (then longest waiting) are served first.
+    BatchResult dispatchBatch();
 
     // Dispatches a specific patient: picks an ambulance, reserves the nearest hospital bed.
     DispatchResult dispatchPatient(const Patient& patient);

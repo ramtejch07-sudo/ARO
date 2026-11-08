@@ -1,5 +1,7 @@
 #include "DispatchManager.h"
+#include <algorithm>
 #include <ctime>
+#include "Hungarian.h"
 
 double DispatchResult::totalDistance() const {
     return toPatient.distance + (hospitalId >= 0 ? toHospital.distance : 0.0);
@@ -228,6 +230,76 @@ bool DispatchManager::routeFromAmbulance(int ambulanceId, int destLocationId, Ro
     if (!r.ok) { error = r.error.empty() ? "no route found" : r.error; return false; }
     out = legFromRoute(amb->getCurrentLocation().getId(), destLocationId, r);
     return true;
+}
+
+double severityWeight(Severity s) {
+    switch (s) {
+        case Severity::LOW:      return 1.0;
+        case Severity::MEDIUM:   return 2.0;
+        case Severity::HIGH:     return 4.0;
+        case Severity::CRITICAL: return 8.0;
+    }
+    return 1.0;
+}
+
+namespace {
+constexpr double kForbidden = 1e9;          // cost of an impossible (unreachable) pair
+constexpr double kServedBonusSec = 1e6;     // per severity weight: serving a patient always beats leaving them out
+constexpr double kAgingPerSecond = 5.0;     // among equals, who has waited longer goes first
+}
+
+BatchResult DispatchManager::dispatchBatch() {
+    fallbackNote.clear();
+    BatchResult out;
+
+    std::vector<Patient> pats;               // popped in priority order
+    while (!waiting.empty()) { pats.push_back(waiting.top()); waiting.pop(); }
+    if (pats.empty()) { out.error = "no waiting patients"; return out; }
+
+    std::vector<std::shared_ptr<Ambulance>> free;
+    for (const auto& amb : fleet) if (amb->isAvailable()) free.push_back(amb);
+    auto giveUp = [&](const std::string& why) {
+        out.error = why;
+        for (const auto& p : pats) { waiting.push(p); out.unassignedPatientIds.push_back(p.getId()); }
+        out.provider = providerUsed();
+        out.fallbackReason = fallbackNote;
+        return out;
+    };
+    if (free.empty()) return giveUp("no available ambulance");
+
+    std::vector<Waypoint> from, to;
+    for (const auto& amb : free) from.push_back(ambulanceWaypoint(*amb));
+    for (const auto& p : pats) to.push_back(locationWaypoint(p.getLocation()));
+    MatrixResult m = matrix(from, to);                       // m.seconds[ambulance][patient]
+
+    const long long now = clock();
+    std::vector<std::vector<double>> cost(pats.size(), std::vector<double>(free.size(), kForbidden));
+    std::vector<std::vector<double>> weighted(pats.size(), std::vector<double>(free.size(), 0.0));
+    for (size_t i = 0; i < pats.size(); ++i) {
+        const double w = severityWeight(pats[i].getSeverity());
+        const double aging = kAgingPerSecond * static_cast<double>(std::max(0LL, now - pats[i].getCreatedAt()));
+        for (size_t a = 0; a < free.size(); ++a) {
+            const double secs = m.seconds[a][i];
+            if (secs < 0 || !graph.hasLocation(pats[i].getLocation().getId())) continue;   // stays forbidden
+            const bool mismatch = pats[i].requiresAdvancedSupport() && free[a]->getType() != AmbulanceType::ADVANCED;
+            weighted[i][a] = w * (secs + (mismatch ? kBasicForCriticalPenaltySec : 0.0));
+            cost[i][a] = weighted[i][a] - kServedBonusSec * w - aging;
+        }
+    }
+    const std::vector<int> assign = solveAssignment(cost);
+
+    std::vector<Patient> still;
+    for (size_t i = 0; i < pats.size(); ++i) {
+        const int col = assign[i];
+        if (col < 0 || cost[i][static_cast<size_t>(col)] >= kForbidden / 2) { still.push_back(pats[i]); continue; }
+        const size_t a = static_cast<size_t>(col);
+        out.dispatched.push_back(startDispatch(pats[i], free[a], m.seconds[a][i], m.provider));
+        out.totalWeightedCostSec += weighted[i][a];
+    }
+    for (const auto& p : still) { waiting.push(p); out.unassignedPatientIds.push_back(p.getId()); }
+    out.provider = providerUsed();
+    out.fallbackReason = fallbackNote;
+    return out;
 }
 
 DispatchResult DispatchManager::dispatchNext() {

@@ -310,6 +310,18 @@ json makeTrip(int id, const DispatchResult& r, double speed) {
     return trip;
 }
 
+// Stores the outcome of one successful dispatch: patient status, dispatch-log entry.
+json recordDispatch(json& data, const DispatchResult& r, double speed) {
+    json* patient = findById(data["patients"], r.patientId);
+    (*patient)["status"] = "DISPATCHED";
+    if (r.hospitalId >= 0) (*patient)["hospitalId"] = r.hospitalId;
+    int tripId = data["nextDispatchId"].get<int>();
+    data["nextDispatchId"] = tripId + 1;
+    json trip = makeTrip(tripId, r, speed);
+    data["dispatchLog"].push_back(trip);
+    return trip;
+}
+
 // Dispatches `patientId`, or the highest-priority waiting patient when patientId < 0.
 json runDispatch(Database& db, json& data, int patientId, const std::shared_ptr<RoutingProvider>& primary) {
     DispatchManager mgr = buildManager(data, primary);
@@ -326,17 +338,25 @@ json runDispatch(Database& db, json& data, int patientId, const std::shared_ptr<
     }
     if (!r.success) throw ApiError{409, r.error};
 
-    json* patient = findById(data["patients"], r.patientId);
-    (*patient)["status"] = "DISPATCHED";
-    if (r.hospitalId >= 0) (*patient)["hospitalId"] = r.hospitalId;
-
+    json trip = recordDispatch(data, r, mgr.getSpeedKmh());
     syncManager(data, mgr);
-    int tripId = data["nextDispatchId"].get<int>();
-    data["nextDispatchId"] = tripId + 1;
-    json trip = makeTrip(tripId, r, mgr.getSpeedKmh());
-    data["dispatchLog"].push_back(trip);
     commit(db);
     return trip;
+}
+
+// Dispatches every waiting patient at once (Hungarian assignment on the ETA matrix).
+json runBatch(Database& db, json& data, const std::shared_ptr<RoutingProvider>& primary) {
+    DispatchManager mgr = buildManager(data, primary);
+    BatchResult b = mgr.dispatchBatch();
+    if (b.dispatched.empty()) throw ApiError{b.error == "no waiting patients" ? 404 : 409,
+                                             b.error.empty() ? "no waiting patient could be reached" : b.error};
+    json trips = json::array();
+    for (const DispatchResult& r : b.dispatched) trips.push_back(recordDispatch(data, r, mgr.getSpeedKmh()));
+    syncManager(data, mgr);
+    commit(db);
+    return {{"trips", trips}, {"unassigned", b.unassignedPatientIds},
+            {"totalWeightedCostSec", b.totalWeightedCostSec},
+            {"provider", b.provider}, {"fallbackReason", b.fallbackReason}};
 }
 
 // advance one lifecycle step, or complete the trip outright
@@ -659,6 +679,12 @@ void registerRoutes(httplib::Server& svr, Database& db, std::shared_ptr<RoutingP
     svr.Post("/api/dispatch", route(db, [&db, primary](auto& req, auto& res, json& d) {
         json b = parseBody(req);
         setJson(res, runDispatch(db, d, requireInt(b, "patientId"), primary), 201);
+    }));
+    // POST /api/dispatch/batch: dispatches ALL waiting patients at once, pairing them with free
+    // ambulances to minimise the total severity-weighted response time (Hungarian algorithm).
+    // Greedy one-at-a-time (/api/dispatch and /api/dispatch/next) stays the default.
+    svr.Post("/api/dispatch/batch", route(db, [&db, primary](auto&, auto& res, json& d) {
+        setJson(res, runBatch(db, d, primary), 201);
     }));
     // POST /api/dispatch/next: serves the highest-priority waiting patient (severity, then wait time).
     svr.Post("/api/dispatch/next", route(db, [&db, primary](auto&, auto& res, json& d) {
