@@ -259,3 +259,19 @@ $('btn-next').addEventListener('click', async () => {
   } catch (e) { toast('Dispatch failed: ' + e.message, 'err'); }
   finally { btn.disabled = false; }
 });
+
+// ---------- dispatch all waiting patients at once (Hungarian assignment) ----------
+$('btn-batch').addEventListener('click', async () => {
+  const btn = $('btn-batch');
+  btn.disabled = true;
+  try {
+    const out = await post('/api/dispatch/batch');
+    const worst = Math.max(...out.trips.map(t => t.legs[0].etaMinutes));
+    let msg = `${out.trips.length} patient(s) matched at once (${out.provider}); the longest wait for a unit is ${worst.toFixed(1)} min.`;
+    if (out.unassigned.length) msg += ` ${out.unassigned.length} still waiting for a free unit.`;
+    toast(msg, out.fallbackReason || out.unassigned.length ? 'warn' : 'ok', 9000);
+    $('dispatch-note').textContent = out.fallbackReason ? `Real-road routing unavailable (${out.fallbackReason}); estimated on the stored graph.` : '';
+    await refresh();
+  } catch (e) { toast('Batch dispatch failed: ' + e.message, 'err'); }
+  finally { btn.disabled = false; }
+});

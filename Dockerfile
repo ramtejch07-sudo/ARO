@@ -20,6 +20,8 @@ COPY web/ web/
 RUN mkdir -p data
 # Render and most hosts inject PORT; the server reads it and falls back to 8080.
 ENV PORT=8080
+# Real-road routing server. The public demo is plain http (this build has no TLS). Use "off" for graph-only routing.
+ENV OSRM_URL=http://router.project-osrm.org
 EXPOSE 8080
 # The slim image has no curl/wget, so the server binary probes itself (GET /api/health).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

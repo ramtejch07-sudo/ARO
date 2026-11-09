@@ -26,7 +26,10 @@
         <button id="btn-pick" class="btn">Click map to add</button>
       </div>
       <p id="pick-hint" class="muted" hidden>Click a spot on the map to place the patient.</p>
-      <button id="btn-next" class="btn btn--primary btn--wide">Dispatch next</button>
+      <div class="row">
+        <button id="btn-next" class="btn btn--primary" title="Greedy: the most urgent waiting patient gets the fastest unit">Dispatch next</button>
+        <button id="btn-batch" class="btn" title="Matches ALL waiting patients with free units at once (Hungarian algorithm)">Dispatch all (batch)</button>
+      </div>
       <p id="dispatch-note" class="muted"></p>
     </section>
 

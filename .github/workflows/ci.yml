@@ -18,6 +18,12 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Run console demo
         run: ./build/ambulance_sim
+      - name: Simulation smoke run (offline) + repeatability
+        run: |
+          ./build/aro_simulate --offline --calls 120 --repeat 2 --seed 7 --out sim_a
+          ./build/aro_simulate --offline --calls 120 --repeat 2 --seed 7 --out sim_b
+          diff sim_a/summary.csv sim_b/summary.csv     # same seed -> identical results
+          test -s sim_a/summary.md && test -s sim_a/response_times.svg && test -s sim_a/response_times.html
 
   plain-gpp:
     name: Plain g++ build (no CMake) + server smoke test
@@ -32,9 +38,15 @@ jobs:
           server/ApiServer.cpp server/ApiRoutes.cpp server/Database.cpp server/OsrmRoutingProvider.cpp
           $(ls src/*.cpp | grep -v '/main.cpp')
           -o ambulance_server -lpthread
+      - name: Build simulation
+        run: >
+          g++ -std=c++17 -O2 -Iinclude -Iserver sim/aro_simulate.cpp server/Database.cpp server/OsrmRoutingProvider.cpp
+          $(ls src/*.cpp | grep -v '/main.cpp') -o aro_simulate -lpthread
+      - name: Simulation smoke run
+        run: ./aro_simulate --offline --calls 80 --out sim_plain && test -s sim_plain/summary.csv
       - name: Smoke test the server
         run: |
-          PORT=8099 ./ambulance_server &
+          PORT=8099 OSRM_URL=off ./ambulance_server &
           for i in $(seq 1 20); do curl -fs http://localhost:8099/api/health && break || sleep 0.5; done
           curl -fs http://localhost:8099/api/locations
           PORT=8099 ./ambulance_server --healthcheck
