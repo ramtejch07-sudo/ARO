@@ -49,6 +49,18 @@ if(ARO_BUILD_SERVER)
   target_compile_options(ambulance_server PRIVATE ${ARO_WARNINGS})
 endif()
 
+# ---- Simulation (compares dispatch strategies; see README) ----
+if(ARO_BUILD_SERVER OR ARO_BUILD_TESTS)
+  add_executable(aro_simulate sim/aro_simulate.cpp)
+  target_link_libraries(aro_simulate PRIVATE aro_api)
+  target_compile_options(aro_simulate PRIVATE ${ARO_WARNINGS})
+  if(ARO_BUILD_TESTS)
+    enable_testing()
+    # Smoke run: small, offline (no network), must finish and write its results.
+    add_test(NAME simulate_smoke COMMAND aro_simulate --offline --calls 60 --repeat 2 --out ${CMAKE_BINARY_DIR}/sim_smoke)
+  endif()
+endif()
+
 # ---- Tests ----
 if(ARO_BUILD_TESTS)
   enable_testing()

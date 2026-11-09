@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 400" width="940" height="400" font-family="Helvetica, Arial, sans-serif">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="470" y="26" text-anchor="middle" font-size="18" font-weight="bold" fill="#111">Ambulance response time by dispatch strategy</text>
+<text x="470" y="46" text-anchor="middle" font-size="12" fill="#555">500 random emergencies in Hyderabad, 14 ambulances, 10 runs (seed 42), travel times: stored road graph (offline, straight line x 1.3)</text>
+<text x="290" y="74" text-anchor="middle" font-size="14" font-weight="bold" fill="#222">Response time (lower is better)</text>
+<line x1="70" y1="340" x2="510" y2="340" stroke="#e3e6ea"/><text x="64" y="344" text-anchor="end" font-size="11" fill="#555">0.0</text>
+<line x1="70" y1="290" x2="510" y2="290" stroke="#e3e6ea"/><text x="64" y="294" text-anchor="end" font-size="11" fill="#555">6.0</text>
+<line x1="70" y1="240" x2="510" y2="240" stroke="#e3e6ea"/><text x="64" y="244" text-anchor="end" font-size="11" fill="#555">12.0</text>
+<line x1="70" y1="190" x2="510" y2="190" stroke="#e3e6ea"/><text x="64" y="194" text-anchor="end" font-size="11" fill="#555">18.0</text>
+<line x1="70" y1="140" x2="510" y2="140" stroke="#e3e6ea"/><text x="64" y="144" text-anchor="end" font-size="11" fill="#555">24.0</text>
+<line x1="70" y1="90" x2="510" y2="90" stroke="#e3e6ea"/><text x="64" y="94" text-anchor="end" font-size="11" fill="#555">30.0</text>
+<text x="32" y="215" font-size="11" fill="#555" transform="rotate(-90 32 215)" text-anchor="middle">minutes</text>
+<rect x="85.4" y="225.893" width="37.6" height="114.107" fill="#3e8ef7"/><text x="104.2" y="221.893" text-anchor="middle" font-size="10" fill="#222">13.7</text>
+<rect x="125" y="145.033" width="37.6" height="194.967" fill="#e5484d"/><text x="143.8" y="141.033" text-anchor="middle" font-size="10" fill="#222">23.4</text>
+<text x="125" y="358" text-anchor="middle" font-size="11" fill="#222">random</text>
+<rect x="195.4" y="261.49" width="37.6" height="78.51" fill="#3e8ef7"/><text x="214.2" y="257.49" text-anchor="middle" font-size="10" fill="#222">9.4</text>
+<rect x="235" y="194.369" width="37.6" height="145.631" fill="#e5484d"/><text x="253.8" y="190.369" text-anchor="middle" font-size="10" fill="#222">17.5</text>
+<text x="235" y="358" text-anchor="middle" font-size="11" fill="#222">straight-line</text>
+<rect x="305.4" y="257.329" width="37.6" height="82.671" fill="#3e8ef7"/><text x="324.2" y="253.329" text-anchor="middle" font-size="10" fill="#222">9.9</text>
+<rect x="345" y="187.055" width="37.6" height="152.945" fill="#e5484d"/><text x="363.8" y="183.055" text-anchor="middle" font-size="10" fill="#222">18.4</text>
+<text x="345" y="358" text-anchor="middle" font-size="11" fill="#222">greedy ETA</text>
+<rect x="415.4" y="259.709" width="37.6" height="80.2911" fill="#3e8ef7"/><text x="434.2" y="255.709" text-anchor="middle" font-size="10" fill="#222">9.6</text>
+<rect x="455" y="191.123" width="37.6" height="148.877" fill="#e5484d"/><text x="473.8" y="187.123" text-anchor="middle" font-size="10" fill="#222">17.9</text>
+<text x="455" y="358" text-anchor="middle" font-size="11" fill="#222">batch Hungarian</text>
+<rect x="78" y="86" width="10" height="10" fill="#3e8ef7"/><text x="92" y="95" font-size="11" fill="#222">average</text>
+<rect x="228" y="86" width="10" height="10" fill="#e5484d"/><text x="242" y="95" font-size="11" fill="#222">90th percentile</text>
+<text x="730" y="74" text-anchor="middle" font-size="14" font-weight="bold" fill="#222">Reached within 8 minutes (higher is better)</text>
+<line x1="560" y1="340" x2="900" y2="340" stroke="#e3e6ea"/><text x="554" y="344" text-anchor="end" font-size="11" fill="#555">0.0</text>
+<line x1="560" y1="290" x2="900" y2="290" stroke="#e3e6ea"/><text x="554" y="294" text-anchor="end" font-size="11" fill="#555">20.0</text>
+<line x1="560" y1="240" x2="900" y2="240" stroke="#e3e6ea"/><text x="554" y="244" text-anchor="end" font-size="11" fill="#555">40.0</text>
+<line x1="560" y1="190" x2="900" y2="190" stroke="#e3e6ea"/><text x="554" y="194" text-anchor="end" font-size="11" fill="#555">60.0</text>
+<line x1="560" y1="140" x2="900" y2="140" stroke="#e3e6ea"/><text x="554" y="144" text-anchor="end" font-size="11" fill="#555">80.0</text>
+<line x1="560" y1="90" x2="900" y2="90" stroke="#e3e6ea"/><text x="554" y="94" text-anchor="end" font-size="11" fill="#555">100.0</text>
+<text x="522" y="215" font-size="11" fill="#555" transform="rotate(-90 522 215)" text-anchor="middle">% of calls</text>
+<rect x="571.9" y="279.55" width="59.2" height="60.45" fill="#9aa5b1"/><text x="601.5" y="275.55" text-anchor="middle" font-size="10" fill="#222">24.2</text>
+<text x="602.5" y="358" text-anchor="middle" font-size="11" fill="#222">random</text>
+<rect x="656.9" y="217.2" width="59.2" height="122.8" fill="#f5a524"/><text x="686.5" y="213.2" text-anchor="middle" font-size="10" fill="#222">49.1</text>
+<text x="687.5" y="358" text-anchor="middle" font-size="11" fill="#222">straight-line</text>
+<rect x="741.9" y="225.2" width="59.2" height="114.8" fill="#3e8ef7"/><text x="771.5" y="221.2" text-anchor="middle" font-size="10" fill="#222">45.9</text>
+<text x="772.5" y="358" text-anchor="middle" font-size="11" fill="#222">greedy ETA</text>
+<rect x="826.9" y="221" width="59.2" height="119" fill="#30a46c"/><text x="856.5" y="217" text-anchor="middle" font-size="10" fill="#222">47.6</text>
+<text x="857.5" y="358" text-anchor="middle" font-size="11" fill="#222">batch Hungarian</text>
+</svg>

@@ -294,3 +294,66 @@ TEST(BatchDispatch, ReservesHospitalBedsWithoutDoubleBooking) {
     EXPECT_EQ(withBed, 1);
     EXPECT_EQ(m.getHospitals()[0].getAvailableBeds(), 0);
 }
+
+// ---------------------------------------------------------------- baseline strategies and simulation switches
+
+TEST(Strategies, NearestStraightLineIgnoresTravelTimeAndAmbulanceType) {
+    Graph g = batchCity();
+    auto f = std::make_shared<FakeProvider>();
+    // Unit 101 (location 1, lat 17.41) is geographically nearest to the scene at location 3 (17.43) but slow by road.
+    f->secs = {{{1, 3}, 900}, {{2, 3}, 60}, {{3, 5}, 10}};
+    auto m = batchManager(g, f, {AmbulanceType::BASIC, AmbulanceType::ADVANCED});
+    m.setSelection(AmbulanceSelection::NEAREST_STRAIGHT_LINE);
+    DispatchResult r = m.dispatchPatient(pat(g, 1, 3, Severity::CRITICAL, 100));
+    ASSERT_TRUE(r.success);
+    EXPECT_EQ(r.ambulanceId, 102);                           // location 2 (17.42) is the nearer as the crow flies
+    // (the ETA rule would also pick 102 here, so make the road time of 102 terrible and check the baseline still picks it)
+    f->secs[{2, 3}] = 5000;
+    auto m2 = batchManager(g, f, {AmbulanceType::BASIC, AmbulanceType::ADVANCED});
+    m2.setSelection(AmbulanceSelection::NEAREST_STRAIGHT_LINE);
+    EXPECT_EQ(m2.dispatchPatient(pat(g, 1, 3, Severity::LOW, 100)).ambulanceId, 102);
+    auto eta = batchManager(g, f, {AmbulanceType::BASIC, AmbulanceType::ADVANCED});
+    EXPECT_EQ(eta.dispatchPatient(pat(g, 1, 3, Severity::LOW, 100)).ambulanceId, 101);   // the real rule uses road time
+}
+
+TEST(Strategies, RandomIsRepeatableForASeedAndOnlyPicksReachableUnits) {
+    Graph g = batchCity();
+    auto f = std::make_shared<FakeProvider>();
+    f->secs = {{{1, 3}, 100}, {{2, 3}, 100}, {{3, 5}, 10}};
+    std::vector<int> a, b;
+    for (int run = 0; run < 2; ++run) {
+        for (int i = 0; i < 12; ++i) {
+            auto m = batchManager(g, f);
+            m.setSelection(AmbulanceSelection::RANDOM, 100 + i);
+            (run == 0 ? a : b).push_back(m.dispatchPatient(pat(g, 1, 3, Severity::MEDIUM, 1)).ambulanceId);
+        }
+    }
+    EXPECT_EQ(a, b);                                         // same seeds -> same picks
+    EXPECT_GT(std::count(a.begin(), a.end(), 101), 0);       // and both units get picked over different seeds
+    EXPECT_GT(std::count(a.begin(), a.end(), 102), 0);
+    f->secs.erase({2, 3});                                   // unit 102 cannot reach the scene any more
+    for (int i = 0; i < 10; ++i) {
+        auto m = batchManager(g, f);
+        m.setSelection(AmbulanceSelection::RANDOM, i);
+        EXPECT_EQ(m.dispatchPatient(pat(g, 1, 3, Severity::MEDIUM, 1)).ambulanceId, 101);
+    }
+}
+
+TEST(Strategies, SkippingGeometryLookupsKeepsTheEtaAndSavesRouteCalls) {
+    struct Counting : FakeProvider {
+        mutable int routeCalls = 0;
+        RouteInfo route(const Waypoint& a, const Waypoint& b) const override { ++routeCalls; return FakeProvider::route(a, b); }
+    };
+    Graph g = batchCity();
+    auto p = std::make_shared<Counting>();
+    p->secs = batchTimes()->secs;
+    auto m = batchManager(g, p);
+    m.setFetchGeometry(false);
+    DispatchResult r = m.dispatchPatient(pat(g, 1, 3, Severity::MEDIUM, 1));
+    ASSERT_TRUE(r.success);
+    EXPECT_EQ(p->routeCalls, 0);
+    EXPECT_DOUBLE_EQ(r.toPatient.durationSec, 60.0);
+    EXPECT_TRUE(r.toPatient.geometry.empty());
+    EXPECT_EQ(r.provider, "fake");
+    EXPECT_TRUE(r.fallbackReason.empty());
+}

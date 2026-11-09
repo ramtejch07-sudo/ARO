@@ -1,5 +1,6 @@
 #include "DispatchManager.h"
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 #include "Hungarian.h"
 
@@ -23,6 +24,7 @@ void DispatchManager::setSpeedKmh(double kmh) {
 }
 double DispatchManager::getSpeedKmh() const { return speedKmh; }
 void DispatchManager::setPrimaryProvider(std::shared_ptr<RoutingProvider> provider) { primary = std::move(provider); }
+void DispatchManager::setSelection(AmbulanceSelection sel, unsigned seed) { selection = sel; rng.seed(seed); }
 void DispatchManager::setClock(std::function<long long()> c) { if (c) clock = std::move(c); }
 
 void DispatchManager::enqueue(const Patient& patient) { waiting.push(patient); }
@@ -100,6 +102,7 @@ RouteLeg DispatchManager::legFromEta(int fromId, int toId, double seconds, const
 
 RouteLeg DispatchManager::buildLeg(const Waypoint& from, const Waypoint& to, int fromId, int toId, double etaSec,
                                    const std::string& etaProvider) const {
+    if (!fetchGeometry) return legFromEta(fromId, toId, etaSec, etaProvider);
     if (primary && etaProvider == primary->name()) {
         RouteInfo r = primary->route(from, to);
         if (r.ok) return legFromRoute(fromId, toId, r);
@@ -133,6 +136,26 @@ std::shared_ptr<Ambulance> DispatchManager::selectAmbulance(const Patient& patie
         }
         return pick;
     };
+
+    if (selection == AmbulanceSelection::RANDOM || selection == AmbulanceSelection::NEAREST_STRAIGHT_LINE) {
+        // Naive baselines: only reachability comes from the provider; the type is ignored.
+        std::vector<size_t> reachable;
+        for (size_t i = 0; i < free.size(); ++i) if (m.seconds[i][0] >= 0) reachable.push_back(i);
+        if (reachable.empty()) { whyNot = "no available ambulance can reach the patient"; return nullptr; }
+        size_t pick = reachable[0];
+        if (selection == AmbulanceSelection::RANDOM) {
+            pick = reachable[std::uniform_int_distribution<size_t>(0, reachable.size() - 1)(rng)];
+        } else {
+            auto straight = [&](size_t i) {
+                const Location a = free[i]->getCurrentLocation(), b = patient.getLocation();
+                return a.hasGeo() && b.hasGeo() ? haversineKm(a.geo(), b.geo())
+                                                : std::hypot(a.getX() - b.getX(), a.getY() - b.getY());
+            };
+            for (size_t i : reachable) if (straight(i) < straight(pick)) pick = i;
+        }
+        etaSec = m.seconds[pick][0];
+        return free[pick];
+    }
 
     if (patient.requiresAdvancedSupport()) {
         if (auto adv = fastest(true)) return adv;

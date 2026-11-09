@@ -2,6 +2,7 @@
 #include <functional>
 #include <memory>
 #include <queue>
+#include <random>
 #include <string>
 #include <vector>
 #include "Ambulance.h"
@@ -62,6 +63,11 @@ double severityWeight(Severity s);
 // Extra "seconds" charged when a HIGH/CRITICAL patient would get a BASIC unit (soft version of the greedy rule).
 constexpr double kBasicForCriticalPenaltySec = 600.0;
 
+// How a free ambulance is picked for a patient. FASTEST_ETA is the real rule (provider travel time,
+// ADVANCED units for HIGH/CRITICAL). The other two are deliberately naive baselines used by the
+// simulation to show how much the real rule helps; both ignore the ambulance type.
+enum class AmbulanceSelection { FASTEST_ETA, NEAREST_STRAIGHT_LINE, RANDOM };
+
 // Result of moving a trip forward (advance / complete).
 struct TripStep {
     bool ok = false;
@@ -90,6 +96,11 @@ public:
     // Optional preferred routing provider (e.g. OSRM = real roads). Dispatch decisions use its
     // travel times; if it fails, the stored graph is used instead and the result says so.
     void setPrimaryProvider(std::shared_ptr<RoutingProvider> provider);
+    // Baseline strategies for benchmarking (default FASTEST_ETA). `seed` makes RANDOM repeatable.
+    void setSelection(AmbulanceSelection selection, unsigned seed = 1);
+    // false = legs carry only the travel time (no route geometry lookups): used by the simulation,
+    // which makes thousands of dispatches and must not call a routing server for every polyline.
+    void setFetchGeometry(bool fetch) { fetchGeometry = fetch; }
     // Clock used to decide whether a GPS fix is fresh (Unix seconds). Tests and simulations inject theirs.
     void setClock(std::function<long long()> clock);
 
@@ -141,6 +152,9 @@ private:
     std::shared_ptr<GraphRoutingProvider> graphProvider;   // always available fallback
     std::shared_ptr<RoutingProvider> primary;              // optional preferred provider
     std::function<long long()> clock;
+    AmbulanceSelection selection = AmbulanceSelection::FASTEST_ETA;
+    mutable std::mt19937 rng{1};
+    bool fetchGeometry = true;
     mutable std::string fallbackNote;                      // set when the primary provider failed
 
     Hospital* findHospital(int id);

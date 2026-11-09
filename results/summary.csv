@@ -1,0 +1,5 @@
+strategy,runs,calls,avg_response_min,avg_response_sd_min,p90_response_min,pct_within_8_min,hospital_overflow,advanced_match_pct,critical_avg_response_min,travel_times
+"random",10,500,13.69,0.74,23.40,24.18,35.60,43.27,13.50,"stored road graph (offline, straight line x 1.3)"
+"straight-line",10,500,9.42,0.63,17.48,49.12,29.30,43.34,9.39,"stored road graph (offline, straight line x 1.3)"
+"greedy ETA",10,500,9.92,0.67,18.35,45.92,31.20,89.80,11.34,"stored road graph (offline, straight line x 1.3)"
+"batch Hungarian",10,500,9.63,0.56,17.87,47.60,30.00,84.24,10.07,"stored road graph (offline, straight line x 1.3)"

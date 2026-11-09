@@ -62,6 +62,7 @@ bool OsrmRoutingProvider::get(const std::string& target, std::string& body, std:
     cli.set_connection_timeout(timeoutSec, 0);
     cli.set_read_timeout(timeoutSec, 0);
     cli.set_follow_location(true);
+    cli.set_path_encode(false);   // send "lng,lat;lng,lat" literally, exactly as in the OSRM docs
     cli.set_default_headers({{"User-Agent", "ARO-ambulance-dispatch/1.0 (student project)"}});
 
     ++requests;
